@@ -1,0 +1,7050 @@
+import { createPortal } from "react-dom";
+import { BrandLogo } from "./BrandLogo";
+import {
+  memo,
+  useCallback,
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
+import {
+  Activity,
+  AlertTriangle,
+  ArrowDown,
+  ArrowUp,
+  Bot,
+  Check,
+  CircleDollarSign,
+  ChevronDown,
+  Code2,
+  Copy,
+  Database,
+  Files,
+  Gauge,
+  GitBranch,
+  History,
+  ListOrdered,
+  ListTodo,
+  Loader2,
+  LogOut,
+  Maximize2,
+  Minimize2,
+  Moon,
+  Paperclip,
+  PanelLeft,
+  Play,
+  RefreshCw,
+  RotateCcw,
+  Search,
+  Settings2,
+  ShieldCheck,
+  Sparkles,
+  SquarePen,
+  Sigma,
+  Sun,
+  Wrench,
+  Volume2,
+  VolumeX,
+  X,
+} from "lucide-react";
+import { MarkdownBody } from "./MarkdownBody";
+import { ShellCommand } from "./ShellCommand";
+import { SessionAnswerBadge, SessionIssueBadge } from "./SessionIssueBadge";
+import { ConversationTimeline } from "./ConversationTimeline";
+import { MessageSearch } from "./MessageSearchPanel";
+import { ProviderManager } from "./ProviderManager";
+import { useTheme } from "./useTheme";
+import { useHistoricalMessages } from "./useHistoricalMessages";
+import { AskCard } from "./AskCard";
+import { askInfo, isAskTool } from "./ask";
+import { DelegationCard } from "./DelegationCard";
+import { delegationInfo, isDelegationTool } from "./delegation";
+import {
+  api,
+  ApiError,
+  commandData,
+  hostIsRetired,
+  reopenHost,
+  roleOf,
+  type AuthProviderStatus,
+  type Capabilities,
+  type HistoryResponse,
+  type ModelDescriptor,
+  type Project,
+  type QueueItem,
+  type RuntimeState,
+  type SeqEvent,
+  type SessionSummary,
+  type ToolCatalog,
+} from "./api";
+import {
+  detectLanguage,
+  saveLanguage,
+  translate,
+  valueLabel,
+  type Language,
+  type MessageKey,
+} from "./i18n";
+import { Splitter, useStoredNumber, Workbench } from "./Workbench";
+import { MenuSelect } from "./MenuSelect";
+import { LoginScreen } from "./LoginScreen";
+import { ProjectContext } from "./ProjectContext";
+import { ZoomableImage } from "./ZoomableImage";
+import { ProjectImageContext, projectImageSource } from "./projectImages";
+import { useTranscriptViewport } from "./useTranscriptViewport";
+import { restoreRowsWithNotes } from "./localNotes";
+import { useRunTimings, timingByRow } from "./useRunTimings";
+import { groupTodoUpdates, isTodoTool } from "./todoGroups";
+import { RunElapsed } from "./RunElapsed";
+import { ExecutionTrace } from "./ExecutionTracePanel";
+import { ToolProgramChildren, ToolProgramProvider } from "./ToolProgramChildren";
+import { parentToolCallId } from "./toolProgram";
+import { useExecutionTrace } from "./useExecutionTrace";
+import { traceView } from "./executionTrace";
+import { AttachmentCard, UserMessageBody } from "./AttachmentCard";
+import {
+  ToolDisclosure,
+  TOOL_NAME_MODE_KEY,
+  ToolNameModeContext,
+  toolSummary,
+  useToolExpansion,
+  type ToolExpansion,
+  type ToolNameMode,
+} from "./ToolDisclosure";
+import {
+  ConfirmDialog,
+  Modal,
+  PromptDialog,
+  ProjectDialog,
+  ProjectRenameDialog,
+  ProjectSidebar,
+  RenameDialog,
+  TagsDialog,
+} from "./ProjectSidebar";
+import {
+  loadedSearchResults,
+  summaryMatches,
+  type MessageSearchResult,
+} from "./messageSearch";
+import {
+  rowsFromAssistant,
+  rowsFromMessages,
+  rowsFromUser,
+  prependRows,
+  upsertTool,
+  withoutPrefix,
+  eventsAfterSnapshot,
+  toolTiming,
+  isShellTool,
+  readOutput,
+  shellCommand,
+  shellOutput,
+  planInfo,
+  todoInfo,
+  editInfo,
+  isMarkdownText,
+  imageBlocksOf,
+  type ImageBlock,
+  type PlanInfo,
+  type TodoInfo,
+  type EditInfo,
+  elapsedMs,
+  stopToolTimers,
+  type ToolTiming,
+  textOf,
+  type Row,
+} from "./transcript";
+
+function isImageAttachment(name: string, mimeType = "") {
+  return (
+    mimeType.toLowerCase().startsWith("image/") ||
+    /\.(?:avif|bmp|gif|jpe?g|png|svg|webp)$/i.test(name)
+  );
+}
+
+type Attachment = {
+  name: string;
+  path: string;
+  size: number;
+  previewUrl?: string;
+};
+
+const DRAFT_STORAGE_KEY = "rpi-session-drafts";
+
+function loadDrafts(): Map<string, string> {
+  try {
+    const raw = localStorage.getItem(DRAFT_STORAGE_KEY);
+    if (!raw) return new Map();
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      return new Map();
+    return new Map(
+      Object.entries(parsed as Record<string, unknown>).filter(
+        (entry): entry is [string, string] =>
+          typeof entry[0] === "string" &&
+          typeof entry[1] === "string" &&
+          entry[1].length > 0,
+      ),
+    );
+  } catch {
+    return new Map();
+  }
+}
+
+function saveDrafts(drafts: Map<string, string>) {
+  try {
+    if (drafts.size === 0) {
+      localStorage.removeItem(DRAFT_STORAGE_KEY);
+      return;
+    }
+    localStorage.setItem(
+      DRAFT_STORAGE_KEY,
+      JSON.stringify(Object.fromEntries(drafts)),
+    );
+  } catch {
+    /* optional browser persistence */
+  }
+}
+
+const EVENT_TYPES = [
+  "ready",
+  "agent_start",
+  "operation_accepted",
+  "agent_end",
+  "agent_settled",
+  "turn_start",
+  "turn_end",
+  "message_start",
+  "message_update",
+  "message_end",
+  "tool_execution_start",
+  "tool_execution_update",
+  "tool_execution_end",
+  "ui_dialog_request",
+  "ui_dialog_closed",
+  "retry_scheduled",
+  "host_error",
+  "host_closed",
+] as const;
+
+type ToolRow = Extract<Row, { kind: "tool" }>;
+
+type UiDialogOption = {
+  title?: string;
+  description?: string;
+  value?: unknown;
+  permission?: string;
+};
+
+type UiDialog = {
+  requestId: string;
+  toolCallId?: string;
+  ui: {
+    purpose?: "question" | "permission" | string;
+    question?: string;
+    message?: string;
+    context?: string;
+    kind?: string;
+    options?: UiDialogOption[];
+    allowFreeform?: boolean;
+    allowMultiple?: boolean;
+    allowComment?: boolean;
+    suggest?: string;
+    freeform?: boolean;
+  };
+};
+
+type TextRequest =
+  | {
+      kind: "prompt";
+      title: string;
+      message?: string;
+      defaultValue?: string;
+    }
+  | { kind: "confirm"; title: string; message: string };
+type SlashCommand = {
+  name: string;
+  usage: string;
+  hint: string;
+  enabled: boolean;
+};
+
+/** Resolve a `/model` argument against the advertised catalog. */
+function modelKey(model: { provider?: string | null; id: string }) {
+  return JSON.stringify([model.provider ?? "", model.id]);
+}
+
+function matchModel(models: ModelDescriptor[], query: string) {
+  const needle = query.toLowerCase();
+  if (!needle) return undefined;
+  for (const predicate of [
+    (entry: ModelDescriptor) =>
+      `${entry.provider}/${entry.id}`.toLowerCase() === needle,
+    (entry: ModelDescriptor) => entry.id.toLowerCase() === needle,
+    (entry: ModelDescriptor) => entry.name.toLowerCase() === needle,
+    (entry: ModelDescriptor) => entry.provider.toLowerCase() === needle,
+    (entry: ModelDescriptor) => entry.id.toLowerCase().includes(needle),
+    (entry: ModelDescriptor) => entry.name.toLowerCase().includes(needle),
+    (entry: ModelDescriptor) => entry.provider.toLowerCase().includes(needle),
+  ]) {
+    const matches = models.filter(predicate);
+    if (matches.length) return matches.length === 1 ? matches[0] : undefined;
+  }
+  return undefined;
+}
+
+const LOCAL_SLASH_COMMANDS = new Set(["/help", "/tools"]);
+
+/**
+ * How many times a failing event stream may reopen its host before the client
+ * reports the session as unavailable. A healthy stream refills the budget.
+ */
+const MAX_REARMS = 3;
+
+const FAST_SNAPSHOT_OPTIONS = {
+  limit: 40,
+  includeHistory: false,
+} as const;
+
+/**
+ * Read the native snapshot, reopening the session first when its host is not
+ * running (a bridge restart leaves only the registry entry behind).
+ *
+ * Keep the first paint small and defer history to the diagnostics refresh. The
+ * transcript can request older messages on demand, so loading 80 messages plus
+ * 100 history records is unnecessary on every session switch.
+ */
+async function snapshotOf(
+  sessionId: string,
+  options: { limit?: number; includeHistory?: boolean; signal?: AbortSignal } = FAST_SNAPSHOT_OPTIONS,
+) {
+  try {
+    return await api.snapshot(sessionId, options);
+  } catch (cause) {
+    // Aborting a superseded read must not reopen its old session. Authentication
+    // failures also belong to the access boundary, not the host lifecycle.
+    if (options.signal?.aborted || (cause instanceof ApiError && cause.status === 401))
+      throw cause;
+    await api.openSession(sessionId, options.signal);
+    return api.snapshot(sessionId, options);
+  }
+}
+
+function Mark({ large = false }: { large?: boolean }) {
+  return (
+    <div className={`brand-mark ${large ? "large" : ""}`} aria-hidden="true">
+      <BrandLogo size={large ? 58 : 28} />
+    </div>
+  );
+}
+
+function safeJson(value: unknown) {
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function pathOfArgs(args: unknown) {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return "";
+  const record = args as Record<string, unknown>;
+  return typeof record.path === "string"
+    ? record.path
+    : typeof record.filePath === "string"
+      ? record.filePath
+      : typeof record.file_path === "string"
+        ? record.file_path
+        : "";
+}
+
+function syntaxForPath(path: string) {
+  const file = path.split(/[\\/]/).pop()?.toLowerCase() ?? "";
+  if (file === "dockerfile") return "dockerfile";
+  if (file === "makefile") return "makefile";
+  const extension = file.includes(".") ? file.split(".").pop() : "";
+  const syntax: Record<string, string> = {
+    c: "c",
+    cc: "cpp",
+    cpp: "cpp",
+    cs: "csharp",
+    css: "css",
+    gd: "gdscript",
+    go: "go",
+    h: "c",
+    hpp: "cpp",
+    html: "xml",
+    java: "java",
+    js: "javascript",
+    json: "json",
+    jsx: "jsx",
+    md: "markdown",
+    mjs: "javascript",
+    py: "python",
+    rs: "rust",
+    sh: "bash",
+    sql: "sql",
+    svelte: "xml",
+    toml: "ini",
+    ts: "typescript",
+    tsx: "tsx",
+    vue: "xml",
+    xml: "xml",
+    yaml: "yaml",
+    yml: "yaml",
+  };
+  return syntax[extension ?? ""] ?? "text";
+}
+
+function fencedCode(text: string, syntax: string) {
+  const longestFence = Math.max(
+    2,
+    ...Array.from(text.matchAll(/`+/g), (match) => match[0].length),
+  );
+  const fence = "`".repeat(longestFence + 1);
+  return `${fence}${syntax}\n${text.replace(/\r\n/g, "\n")}\n${fence}`;
+}
+
+/** Render read results as source code instead of wrapping them as prose. */
+function ReadCode({
+  path,
+  text,
+  language,
+}: {
+  path: string;
+  text: string;
+  language: Language;
+}) {
+  return (
+    <div className="read-code">
+      {path && <div className="read-code-path">{path}</div>}
+      <MarkdownBody
+        text={fencedCode(text, syntaxForPath(path))}
+        language={language}
+      />
+    </div>
+  );
+}
+
+/** 1234 -> 1.2k, 1234567 -> 1.2M. */
+function formatTokens(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return "0";
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000)
+    return `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1)}k`;
+  return String(Math.round(value));
+}
+
+function statNumber(
+  stats: RuntimeState["stats"],
+  keys: string[],
+): number | null {
+  if (!stats) return null;
+  const values = stats as unknown as Record<string, unknown>;
+  for (const key of keys) {
+    const value = values[key];
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+  }
+  return null;
+}
+
+function normalizeRuntimeStats(value: unknown): RuntimeState["stats"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const looksLikeStats = (candidate: Record<string, unknown>) =>
+    [
+      "input",
+      "output",
+      "inputTokens",
+      "outputTokens",
+      "cacheRead",
+      "cachedTokens",
+      "totalTokens",
+      "operationCount",
+    ].some((key) => key in candidate);
+  if (looksLikeStats(record)) return record as unknown as RuntimeState["stats"];
+  for (const key of ["stats", "usage", "data"]) {
+    const nested = record[key];
+    if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+      const nestedRecord = nested as Record<string, unknown>;
+      if (looksLikeStats(nestedRecord)) {
+        return nestedRecord as unknown as RuntimeState["stats"];
+      }
+    }
+  }
+  for (const nested of Object.values(record)) {
+    if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+      const nestedRecord = nested as Record<string, unknown>;
+      if (looksLikeStats(nestedRecord)) {
+        return nestedRecord as unknown as RuntimeState["stats"];
+      }
+    }
+  }
+  return record as unknown as RuntimeState["stats"];
+}
+
+function usageNumber(value: unknown, keys: string[]): number {
+  if (!value || typeof value !== "object") return 0;
+  const record = value as Record<string, unknown>;
+  for (const key of keys) {
+    const candidate = record[key];
+    if (typeof candidate === "number" && Number.isFinite(candidate)) {
+      return candidate;
+    }
+  }
+  return 0;
+}
+
+function inputTokenCount(stats: RuntimeState["stats"]) {
+  const input = statNumber(stats, ["inputTokens", "input", "promptTokens"]);
+  if (input != null) return input;
+  const cached = cachedTokenCount(stats);
+  const uncached = statNumber(stats, ["uncachedTokens"]);
+  return cached != null && uncached != null ? cached + uncached : null;
+}
+
+function outputTokenCount(stats: RuntimeState["stats"]) {
+  const output = statNumber(stats, [
+    "outputTokens",
+    "output",
+    "completionTokens",
+  ]);
+  if (output != null) return output;
+  const total = statNumber(stats, ["totalTokens"]);
+  const input = inputTokenCount(stats);
+  return total != null && input != null ? Math.max(0, total - input) : null;
+}
+
+function cachedTokenCount(stats: RuntimeState["stats"]) {
+  return statNumber(stats, ["cachedTokens", "cacheRead"]);
+}
+
+function totalTokenCount(stats: RuntimeState["stats"]) {
+  const total = statNumber(stats, ["totalTokens"]);
+  if (total != null) return total;
+  const input = inputTokenCount(stats) ?? 0;
+  const output = outputTokenCount(stats) ?? 0;
+  const cached = cachedTokenCount(stats) ?? 0;
+  const written = statNumber(stats, ["cacheWrite"]) ?? 0;
+  return input + output + cached + written > 0
+    ? input + output + cached + written
+    : null;
+}
+
+function costTotal(stats: RuntimeState["stats"]) {
+  return statNumber(stats, ["costTotal", "cost"]);
+}
+
+function cacheHitRatio(stats: RuntimeState["stats"]): number | null {
+  if (!stats) return null;
+  if (
+    typeof stats.cacheHitRatio === "number" &&
+    Number.isFinite(stats.cacheHitRatio)
+  ) {
+    return Math.max(0, Math.min(1, stats.cacheHitRatio));
+  }
+  const cached = cachedTokenCount(stats) ?? 0;
+  const uncached = statNumber(stats, ["uncachedTokens"]);
+  const input = inputTokenCount(stats);
+  const total = uncached != null ? cached + uncached : (input ?? 0);
+  return total > 0 ? cached / total : null;
+}
+
+/** Native message usage keeps cache reads/writes separate from uncached input. */
+function latestMessageStats(messages: unknown[]): RuntimeState["stats"] {
+  for (const message of [...messages].reverse()) {
+    if (!message || typeof message !== "object") continue;
+    if (roleOf(message) !== "assistant") continue;
+    const usage = (message as Record<string, unknown>).usage;
+    const input = usageNumber(usage, ["input", "inputTokens", "promptTokens"]);
+    const output = usageNumber(usage, [
+      "output",
+      "outputTokens",
+      "completionTokens",
+    ]);
+    const cached = usageNumber(usage, ["cacheRead", "cachedTokens"]);
+    const written = usageNumber(usage, ["cacheWrite"]);
+    const total =
+      usageNumber(usage, ["totalTokens"]) || input + output + cached + written;
+    if (total <= 0) continue;
+    const cost = (usage as Record<string, unknown>).cost;
+    return {
+      messageCount: 1,
+      inputTokens: input + cached + written,
+      outputTokens: output,
+      cachedTokens: cached,
+      uncachedTokens: input + written,
+      totalTokens: total,
+      cacheHitRatio: null,
+      costTotal: typeof cost === "number" ? cost : usageNumber(cost, ["total"]),
+    };
+  }
+  return null;
+}
+
+/** One line of a provider error, for a transcript row. */
+function shortReason(value: unknown) {
+  if (value == null) return "";
+  const text = typeof value === "string" ? value : errorText(value);
+  const line = text.split("\n")[0] ?? "";
+  return line.length > 160 ? `${line.slice(0, 157)}…` : line;
+}
+
+function errorText(cause: unknown) {
+  return cause instanceof Error ? cause.message : String(cause);
+}
+
+function sessionLifecycleError(cause: unknown, language: Language) {
+  if (!(cause instanceof ApiError)) return null;
+  const zh = language === "zh";
+  switch (cause.code) {
+    case "session_busy":
+      return zh ? "会话仍在运行，请先停止并等待结束后再操作。" : "Session is running. Stop it and wait for it to settle before trying again.";
+    case "session_idle_unknown":
+      return zh ? "暂时无法确认会话是否空闲，请稍后重试。" : "Cannot confirm the session is idle. Try again later.";
+    case "session_deleting":
+      return zh ? "会话正在删除，无法打开或操作。请在会话操作菜单中重试永久删除。" : "Session deletion is incomplete. Retry permanent deletion from Session actions before opening or using it.";
+    case "session_archived":
+      return zh ? "请先恢复会话再打开（会话操作 → 恢复会话）。" : "Restore the chat before opening it (Session actions → Restore chat).";
+    default:
+      // Never display remote deletion diagnostics (which may contain private paths).
+      if (cause.code?.includes("delet"))
+        return zh ? "永久删除未完成。请检查会话状态后手动重试。" : "Permanent deletion did not complete. Check the session state, then retry manually.";
+      return null;
+  }
+}
+
+function sessionSelectionError(session?: SessionSummary) {
+  return session?.deleting ? new ApiError("", 409, "session_deleting")
+    : session?.archived ? new ApiError("", 409, "session_archived") : null;
+}
+
+type SessionCompletionNotification = {
+  id: string;
+  sessionId: string;
+  title: string;
+  outcome: string;
+  error: string;
+};
+
+function isFailedOutcome(outcome: string) {
+  return ["failed", "error", "interrupted", "aborted", "stopped"].includes(
+    outcome,
+  );
+}
+
+type SettlementIdentity = NonNullable<SessionSummary["latestSettlement"]>;
+const SESSION_NOTIFICATION_SUCCESS_TIMEOUT_MS = 6_000;
+const SESSION_NOTIFICATION_ERROR_TIMEOUT_MS = 12_000;
+
+function settlementKey(
+  settlement: SettlementIdentity | null | undefined,
+  fallbackSeq?: number,
+) {
+  if (!settlement) return null;
+  if (settlement.runId) return `run:${settlement.runId}`;
+  if (settlement.seq != null) return `seq:${settlement.seq}`;
+  // Older native settlement payloads do not carry a run ID or their SSE
+  // sequence. The session summary still exposes the sequence as lastSeq;
+  // use it so the live event and the polling refresh share one identity.
+  if (fallbackSeq != null) return `seq:${fallbackSeq}`;
+  if (settlement.outcome) return `outcome:${settlement.outcome}`;
+  return null;
+}
+
+function normalizeLevel(value: unknown) {
+  return typeof value === "string" ? value : "";
+}
+
+export default function App() {
+  function errorText(cause: unknown) {
+    return sessionLifecycleError(cause, language) ?? (cause instanceof Error ? cause.message : String(cause));
+  }
+
+  function retirementError(cause: unknown, deleting = false) {
+    return sessionLifecycleError(cause, language) ?? (language === "zh"
+      ? deleting ? "永久删除未完成。请检查会话状态后手动重试。" : "无法更新会话，请稍后重试。"
+      : deleting ? "Permanent deletion did not complete. Check the session state, then retry manually." : "Could not update the chat. Try again later.");
+  }
+  const [capabilities, setCapabilities] = useState<Capabilities | null>(null);
+  const [nativeMessageQueries, setNativeMessageQueries] = useState(false);
+  const [authRequired, setAuthRequired] = useState(false);
+  const [authenticated, setAuthenticated] = useState(false);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [accessCheckFailed, setAccessCheckFailed] = useState(false);
+  const [authRevision, setAuthRevision] = useState(0);
+  const [passwordDraft, setPasswordDraft] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authError, setAuthError] = useState("");
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  // Carry a blocked-link explanation through the first conversation reset.
+  const initialSelectionError = useRef("");
+  const [sessionId, setSessionId] = useState("");
+  const [timelineOpen, setTimelineOpen] = useState(false);
+  const [immersive, setImmersive] = useState(false);
+  useEffect(() => {
+    setTimelineOpen(false);
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (!immersive) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setImmersive(false);
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [immersive]);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [projectsRoot, setProjectsRoot] = useState("");
+  const [projectDialog, setProjectDialog] = useState(false);
+  const [projectRenameTarget, setProjectRenameTarget] =
+    useState<Project | null>(null);
+  const [renameTarget, setRenameTarget] = useState<SessionSummary | null>(null);
+  const [tagsTarget, setTagsTarget] = useState<SessionSummary | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<SessionSummary | null>(null);
+  const [deletePending, setDeletePending] = useState(false);
+  const deleteInFlight = useRef(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [toolNameMode, setToolNameMode] = useState<ToolNameMode>(() => {
+    try {
+      return localStorage.getItem(TOOL_NAME_MODE_KEY) === "mapped" ? "mapped" : "native";
+    } catch {
+      return "native";
+    }
+  });
+  const [mobileSessionPicker, setMobileSessionPicker] = useState(false);
+  const [mobileSessionQuery, setMobileSessionQuery] = useState("");
+  const [creatingSession, setCreatingSession] = useState(false);
+  const creatingSessionRef = useRef(false);
+  const { theme, themePreference, setThemePreference } = useTheme();
+  const [projectId, setProjectId] = useState("");
+  const projectRef = useRef("");
+  const [workbenchOpen, setWorkbenchOpen] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useStoredNumber(
+    "rpi-sidebar-width",
+    248,
+    200,
+    360,
+  );
+  const [workbenchWidth, setWorkbenchWidth] = useStoredNumber(
+    "rpi-workbench-width",
+    440,
+    300,
+    900,
+  );
+  const [sending, setSending] = useState(false);
+  const sendingRef = useRef(false);
+  const sendingRevision = useRef(0);
+  const localMessageSeq = useRef(0);
+  const activeSessionRef = useRef(sessionId);
+  activeSessionRef.current = sessionId;
+  const diagnosticsRevision = useRef(0);
+  const diagnosticsAbort = useRef<AbortController | null>(null);
+  const sessionReadsAbort = useRef<AbortController | null>(null);
+  const navigationRevision = useRef(0);
+  const sessionListRevision = useRef(0);
+  const sessionListRequest = useRef<Promise<SessionSummary[] | null> | null>(
+    null,
+  );
+  const sessionListValue = useRef<SessionSummary[] | null>(null);
+  const sessionListInitialized = useRef(false);
+  const sessionTitles = useRef(new Map<string, string>());
+  const notifiedSettlements = useRef(new Set<string>());
+  const pendingNotificationContinue = useRef<string | null>(null);
+  const [sessionNotifications, setSessionNotifications] = useState<
+    SessionCompletionNotification[]
+  >([]);
+  const notificationTimers = useRef(
+    new Map<string, ReturnType<typeof setTimeout>>(),
+  );
+  const notifySessionCompletion = useCallback(
+    (
+      sessionId: string,
+      title: string | null | undefined,
+      settlement: SettlementIdentity | null | undefined,
+      fallbackSeq?: number,
+    ) => {
+      const identity = settlementKey(settlement, fallbackSeq) ??
+        (fallbackSeq != null ? `seq:${fallbackSeq}` : null);
+      if (!identity) return;
+      const id = `${sessionId}:${identity}`;
+      if (notifiedSettlements.current.has(id)) return;
+      notifiedSettlements.current.add(id);
+      setSessionNotifications((previous) => [
+        ...previous,
+        {
+          id,
+          sessionId,
+          title: title?.trim() || "",
+          outcome: settlement?.outcome || "completed",
+          error: shortReason(settlement?.error),
+        },
+      ].slice(-8));
+    },
+    [],
+  );
+  useEffect(() => {
+    const timers = notificationTimers.current;
+    const activeIds = new Set(sessionNotifications.map((item) => item.id));
+    for (const [id, timer] of timers) {
+      if (!activeIds.has(id)) {
+        clearTimeout(timer);
+        timers.delete(id);
+      }
+    }
+    for (const notification of sessionNotifications) {
+      if (timers.has(notification.id)) continue;
+      const timeout = isFailedOutcome(notification.outcome)
+        ? SESSION_NOTIFICATION_ERROR_TIMEOUT_MS
+        : SESSION_NOTIFICATION_SUCCESS_TIMEOUT_MS;
+      timers.set(
+        notification.id,
+        setTimeout(() => {
+          timers.delete(notification.id);
+          setSessionNotifications((previous) =>
+            previous.filter((item) => item.id !== notification.id),
+          );
+        }, timeout),
+      );
+    }
+  }, [sessionNotifications]);
+  useEffect(
+    () => () => {
+      for (const timer of notificationTimers.current.values()) {
+        clearTimeout(timer);
+      }
+      notificationTimers.current.clear();
+    },
+    [],
+  );
+  const draftBySession = useRef(loadDrafts());
+  const transcriptRef = useRef<HTMLDivElement>(null);
+  const followingRef = useRef(true);
+  const [following, setFollowing] = useState(true);
+  const [rows, setRows] = useState<Row[]>([]);
+  const rowsBySession = useRef(new Map<string, Row[]>());
+  const rowsSessionRef = useRef(sessionId);
+  const earlierPage = useRef<{
+    rows: Row[];
+    firstId: string;
+    hasMore: boolean;
+  } | null>(null);
+  const [runtime, setRuntime] = useState<RuntimeState | null>(null);
+  const [messageStats, setMessageStats] = useState<{
+    sessionId: string;
+    stats: RuntimeState["stats"];
+  } | null>(null);
+  const usingMessageStats =
+    (totalTokenCount(runtime?.stats) ?? 0) <= 0 &&
+    (inputTokenCount(runtime?.stats) ?? 0) <= 0 &&
+    (outputTokenCount(runtime?.stats) ?? 0) <= 0 &&
+    messageStats?.sessionId === sessionId &&
+    !!messageStats?.stats;
+  const displayStats = usingMessageStats
+    ? { ...runtime?.stats, ...messageStats!.stats! }
+    : runtime?.stats;
+  const [authProviders, setAuthProviders] = useState<AuthProviderStatus[]>([]);
+  const [authProvider, setAuthProvider] = useState("");
+  const [apiKeyDraft, setApiKeyDraft] = useState("");
+  const [authMessage, setAuthMessage] = useState<{
+    key: MessageKey;
+    values: Record<string, string>;
+  } | null>(null);
+  const [historyData, setHistory] = useState<HistoryResponse | null>(null);
+  const [queueItems, setQueueItems] = useState<QueueItem[]>([]);
+  const [queueOpen, setQueueOpen] = useState(true);
+  const [queueRunning, setQueueRunning] = useState(false);
+  const pendingQueueItems = queueItems.filter((item) =>
+    isEditableQueueItem(item),
+  );
+  const [showQueueHistory, setShowQueueHistory] = useState(false);
+  const [queueDraft, setQueueDraft] = useState("");
+  const queueInputRef = useRef<HTMLInputElement>(null);
+  const composerInputRef = useRef<HTMLTextAreaElement>(null);
+  const [queueKind, setQueueKind] = useState("followUp");
+  const [queueEditId, setQueueEditId] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  function updateDraft(value: string, targetSession = activeSessionRef.current) {
+    setDraft(value);
+    if (!targetSession) return;
+    if (value.length > 0) draftBySession.current.set(targetSession, value);
+    else draftBySession.current.delete(targetSession);
+    saveDrafts(draftBySession.current);
+  }
+
+  const clearDrafts = useCallback(() => {
+    draftBySession.current.clear();
+    saveDrafts(draftBySession.current);
+  }, []);
+
+  const draftSessionIds = useMemo(
+    () => new Set(draftBySession.current.keys()),
+    [draft],
+  );
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const uploadQueue = useRef<Promise<void>>(Promise.resolve());
+  const uploadScope = useRef<{
+    sessionId: string;
+    projectId: string;
+    controller: AbortController;
+    pending: number;
+  } | null>(null);
+  const attachmentPreviews = useRef(new Set<string>());
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [status, setStatus] = useState("connecting");
+  /** Set when the native host reports `host_closed`; cleared on session switch. */
+  const hostClosedRef = useRef(false);
+  const [loadingSession, setLoadingSession] = useState(false);
+  const [sessionHydrated, setSessionHydrated] = useState(false);
+  const [runActive, setRunActive] = useState(false);
+  const [error, setError] = useState("");
+  const [connectionFailed, setConnectionFailed] = useState(false);
+  const [sidebar, setSidebar] = useState(() => window.innerWidth >= 768);
+  const [panel, setPanel] = useState(false);
+  const [inspector, setInspector] = useState(false);
+  const [traceOpen, setTraceOpen] = useState(false);
+  const traceButtonRef = useRef<HTMLButtonElement>(null);
+  const [seen, setSeen] = useState(0);
+  const [settleTick, setSettleTick] = useState(0);
+  const [connectionRevision, setConnectionRevision] = useState(0);
+  /**
+   * Bounded rearm budget for a stream that keeps failing. Reset whenever a
+   * stream opens successfully, so a healthy reconnect does not consume it.
+   */
+  const rearmBudget = useRef(0);
+  const [leafId, setLeafId] = useState("");
+  const [interrupted, setInterrupted] = useState(false);
+  const [failedRun, setFailedRun] = useState(false);
+  const [recoveryNoticeDismissed, setRecoveryNoticeDismissed] = useState(false);
+  const [firstId, setFirstId] = useState("");
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingEarlier, setLoadingEarlier] = useState(false);
+  const earlierRequest = useRef<{
+    navigation: number;
+    beforeId: string;
+  } | null>(null);
+  const autoEarlierCursor = useRef<string | null>(null);
+  const continueEarlier = useRef<number | null>(null);
+  const traceBinding = `${sessionId}:${connectionRevision}:${navigationRevision.current}`;
+  const historical = useHistoricalMessages(sessionId, traceBinding);
+  const displayedRows = historical.active ? historical.rows : rows;
+  const [messageSearchOpen, setMessageSearchOpen] = useState(false);
+  const [messageSearchQuery, setMessageSearchQuery] = useState("");
+  const [messageSearchHistory, setMessageSearchHistory] = useState<MessageSearchResult[]>([]);
+  const [messageSearchLoading, setMessageSearchLoading] = useState(false);
+  const [messageSearchIndex, setMessageSearchIndex] = useState(0);
+  const messageSearchAbort = useRef<AbortController | null>(null);
+  const messageSearchLoaded = useMemo(
+    () => loadedSearchResults(displayedRows, messageSearchQuery, leafId),
+    [displayedRows, messageSearchQuery, leafId],
+  );
+  const messageSearchResults = useMemo(() => {
+    const seen = new Set(messageSearchLoaded.map((result) => result.entryId));
+    return messageSearchLoaded.concat(
+      messageSearchHistory.filter((result) => !seen.has(result.entryId)),
+    );
+  }, [messageSearchHistory, messageSearchLoaded]);
+  const runTimings = useRunTimings(
+    sessionId, rows, `${connectionRevision}:${navigationRevision.current}`,
+    !loadingSession && Boolean(capabilities), settleTick,
+  );
+  const historicalRunTimings = useRunTimings(
+    sessionId, historical.rows, `${connectionRevision}:${navigationRevision.current}`,
+    historical.active && !loadingSession && Boolean(capabilities), settleTick,
+  );
+  const displayedTimings = historical.active ? historicalRunTimings : runTimings;
+  const runFooters = useMemo(() => timingByRow(displayedRows, displayedTimings), [displayedRows, displayedTimings]);
+  useEffect(() => {
+    messageSearchAbort.current?.abort();
+    setMessageSearchHistory([]);
+    setMessageSearchIndex(0);
+    const query = messageSearchQuery.trim();
+    if (!messageSearchOpen || query.length < 2 || !nativeMessageQueries || !sessionId) {
+      setMessageSearchLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    messageSearchAbort.current = controller;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        const matches: MessageSearchResult[] = [];
+        let beforeId: string | undefined;
+        try {
+          setMessageSearchLoading(true);
+          for (let pageNumber = 0; pageNumber < 20; pageNumber++) {
+            const page = await api.messageSummaries(
+              sessionId,
+              { beforeId, leafId, limit: 100 },
+              controller.signal,
+            );
+            matches.push(...summaryMatches(page.messages, query, page.leafId ?? leafId));
+            if (matches.length >= 100 || !page.hasMore || !page.nextBeforeId || page.nextBeforeId === beforeId) break;
+            beforeId = page.nextBeforeId;
+          }
+          if (!controller.signal.aborted) setMessageSearchHistory(matches.slice(0, 100));
+        } catch (cause) {
+          if (!controller.signal.aborted) {
+            setMessageSearchHistory([]);
+            setError(errorText(cause));
+          }
+        } finally {
+          if (!controller.signal.aborted) setMessageSearchLoading(false);
+        }
+      })();
+    }, 180);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+      if (messageSearchAbort.current === controller) messageSearchAbort.current = null;
+    };
+  }, [leafId, messageSearchOpen, messageSearchQuery, nativeMessageQueries, sessionId]);
+  useEffect(() => {
+    setMessageSearchOpen(false);
+    setMessageSearchQuery("");
+    setMessageSearchHistory([]);
+  }, [sessionId]);
+  const selectMessageSearch = useCallback((index: number) => {
+    const result = messageSearchResults[index];
+    if (!result) return;
+    setMessageSearchIndex(index);
+    const target = result.rowId
+      ? Array.from(document.querySelectorAll<HTMLElement>("[data-transcript-row]"))
+          .find((element) => element.dataset.transcriptRow === result.rowId)
+      : null;
+    if (target && transcriptRef.current) {
+      followingRef.current = false;
+      setFollowing(false);
+      transcriptRef.current.scrollTop +=
+        target.getBoundingClientRect().top -
+        transcriptRef.current.getBoundingClientRect().top -
+        12;
+      return;
+    }
+    if (result.leafId) historical.open({ entryId: result.entryId, leafId: result.leafId });
+  }, [historical, messageSearchResults]);
+  const { state: traceState, snapshot: traceSnapshot, event: traceEvent, clear: clearTrace } =
+    useExecutionTrace(traceBinding);
+  const executionTrace = useMemo(() => traceView(traceState, runTimings), [traceState, runTimings]);
+  const todoOwners = useRef<{
+    sessionId: string;
+    ids: ReadonlySet<string>;
+  } | null>(null);
+  const todoGroups = useMemo(
+    () =>
+      groupTodoUpdates(
+        displayedRows,
+        runFooters,
+        todoOwners.current?.sessionId === sessionId
+          ? todoOwners.current.ids
+          : undefined,
+      ),
+    [displayedRows, runFooters, sessionId],
+  );
+  // Commit display ownership, not task state. A prepend keeps an existing
+  // card's React instance/reading anchor; removed groups retain no cache.
+  useLayoutEffect(() => {
+    todoOwners.current = {
+      sessionId,
+      ids: new Set(
+        [...todoGroups].filter(([, group]) => group !== null).map(([id]) => id),
+      ),
+    };
+  }, [todoGroups, sessionId]);
+  const rememberTranscriptPosition = useTranscriptViewport(
+    transcriptRef,
+    followingRef,
+    `${sessionId}:${connectionRevision}`,
+    Boolean(capabilities),
+    displayedRows,
+    status,
+  );
+  useLayoutEffect(() => {
+    const node = transcriptRef.current;
+    if (!node || !historical.page) return;
+    const anchorId = historical.cursor && "anchorId" in historical.cursor ? historical.cursor.anchorId : null;
+    const row = historical.rows.find(row => row.entryId === anchorId);
+    const target = row && Array.from(node.querySelectorAll<HTMLElement>("[data-transcript-row]"))
+      .find(element => element.dataset.transcriptRow === row.id);
+    followingRef.current = false;
+    setFollowing(false);
+    node.scrollTop = target
+      ? node.scrollTop + target.getBoundingClientRect().top - node.getBoundingClientRect().top - 12
+      : historical.cursor && "beforeId" in historical.cursor ? node.scrollHeight : 0;
+    rememberTranscriptPosition();
+  }, [historical.page, historical.rows, rememberTranscriptPosition]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyHasMore, setHistoryHasMore] = useState(false);
+  const [mutationPending, setMutationPending] = useState(false);
+  const [forkPending, setForkPending] = useState(false);
+  const forkInFlight = useRef(false);
+  const [models, setModels] = useState<ModelDescriptor[]>([]);
+  const [levels, setLevels] = useState<string[]>([]);
+  const [modelPending, setModelPending] = useState(false);
+  const [thinkingPending, setThinkingPending] = useState(false);
+  const [language, setLanguage] = useState<Language>(() => detectLanguage());
+  const [autoRead, setAutoRead] = useState(() => {
+    try { return localStorage.getItem("rpi-auto-read") === "1"; } catch { return false; }
+  });
+  const [readingRowId, setReadingRowId] = useState<string | null>(null);
+  const ttsAudio = useRef<HTMLAudioElement | null>(null);
+  const ttsUrl = useRef<string | null>(null);
+  const ttsAbort = useRef<AbortController | null>(null);
+  const autoReadLast = useRef("");
+  const autoReadSettlement = useRef(0);
+  const stopReading = useCallback(() => {
+    ttsAbort.current?.abort();
+    ttsAbort.current = null;
+    ttsAudio.current?.pause();
+    ttsAudio.current = null;
+    if (ttsUrl.current) URL.revokeObjectURL(ttsUrl.current);
+    ttsUrl.current = null;
+    setReadingRowId(null);
+  }, []);
+  const speakMessage = useCallback(async (rowId: string, text: string) => {
+    if (readingRowId === rowId) {
+      stopReading();
+      return;
+    }
+    stopReading();
+    const controller = new AbortController();
+    ttsAbort.current = controller;
+    try {
+      const voice = language === "zh" ? "zh-CN-XiaoxiaoNeural" : "en-US-AriaNeural";
+      const blob = await api.tts(text, voice, controller.signal);
+      if (controller.signal.aborted) return;
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      ttsUrl.current = url;
+      ttsAudio.current = audio;
+      setReadingRowId(rowId);
+      audio.onended = stopReading;
+      audio.onerror = stopReading;
+      await audio.play();
+    } catch (cause) {
+      if (!controller.signal.aborted) setError(errorText(cause));
+      stopReading();
+    }
+  }, [language, readingRowId, stopReading]);
+  useEffect(() => {
+    try { localStorage.setItem("rpi-auto-read", autoRead ? "1" : "0"); } catch { /* optional browser persistence */ }
+  }, [autoRead]);
+  useEffect(() => {
+    stopReading();
+    autoReadLast.current = "";
+    autoReadSettlement.current = 0;
+  }, [sessionId, stopReading]);
+  useEffect(() => () => stopReading(), [stopReading]);
+  useEffect(() => {
+    if (!sessionHydrated || historical.active || !sessionId) return;
+    const row = [...displayedRows].reverse().find(
+      (candidate): candidate is Extract<Row, { kind: "text" }> =>
+        candidate.kind === "text" && candidate.role === "assistant" && Boolean(candidate.text.trim()),
+    );
+    if (row) autoReadLast.current = `${sessionId}:${row.id}`;
+    autoReadSettlement.current = settleTick;
+  }, [historical.active, sessionHydrated, sessionId]);
+  useEffect(() => {
+    if (!autoRead || !sessionHydrated || historical.active || !sessionId || settleTick === 0) return;
+    if (autoReadSettlement.current === settleTick) return;
+    autoReadSettlement.current = settleTick;
+    const row = [...displayedRows].reverse().find(
+      (candidate): candidate is Extract<Row, { kind: "text" }> =>
+        candidate.kind === "text" && candidate.role === "assistant" && Boolean(candidate.text.trim()),
+    );
+    if (!row) return;
+    const key = `${sessionId}:${row.id}`;
+    if (autoReadLast.current === key) return;
+    autoReadLast.current = key;
+    void speakMessage(row.id, row.text);
+  }, [autoRead, displayedRows, historical.active, sessionId, settleTick, speakMessage]);
+  const [dialog, setDialog] = useState<UiDialog | null>(null);
+  const dialogRequests = useRef(new Map<string, UiDialog>());
+  const activeDialogId = useRef("");
+  const [dialogAnswer, setDialogAnswer] = useState("");
+  const [dialogBusy, setDialogBusy] = useState(false);
+  const [textRequest, setTextRequest] = useState<TextRequest | null>(null);
+  const textRequestResolver = useRef<((value: string | null) => void) | null>(
+    null,
+  );
+
+  useLayoutEffect(() => {
+    const scope = { sessionId, projectId, controller: new AbortController(), pending: 0 };
+    uploadScope.current = scope;
+    uploadQueue.current = Promise.resolve();
+    setUploading(false);
+    setAttachments([]);
+    return () => {
+      scope.controller.abort();
+      if (uploadScope.current === scope) uploadScope.current = null;
+      attachmentPreviews.current.forEach(url => URL.revokeObjectURL(url));
+      attachmentPreviews.current.clear();
+    };
+  }, [sessionId, projectId]);
+  function requestText(request: TextRequest) {
+    // Replacing the shared prompt must also release the previous caller.
+    textRequestResolver.current?.(null);
+    return new Promise<string | null>((resolve) => {
+      textRequestResolver.current = resolve;
+      setTextRequest(request);
+    });
+  }
+
+  function resolveTextRequest(value: string | null) {
+    const resolve = textRequestResolver.current;
+    textRequestResolver.current = null;
+    setTextRequest(null);
+    resolve?.(value);
+  }
+
+  const lastSeq = useRef(0);
+  const noteSeq = useRef(0);
+  const currentAssistant = useRef<string | null>(null);
+  const currentUser = useRef<string | null>(null);
+  const credentialRevision = useRef(0);
+  const dialogRevision = useRef(0);
+  const queueSubmission = useRef(new Set<string>());
+  const queueRunSubmission = useRef(new Set<string>());
+  const queueDraftRevision = useRef(0);
+  const metadataQueues = useRef(new Map<string, Promise<void>>());
+  const metadataRevisions = useRef(new Map<string, number>());
+  const source = useRef<EventSource | null>(null);
+
+  const supported = useMemo(
+    () => new Set(capabilities?.supportedCommands ?? []),
+    [capabilities],
+  );
+  const actions = useMemo(
+    () => new Set(capabilities?.supportedActions ?? []),
+    [capabilities],
+  );
+  const busy =
+    runActive ||
+    status === "running" ||
+    status === "starting" ||
+    status === "awaiting_input";
+  const composerAbort = busy && supported.has("abort") && !loadingSession && !connectionFailed;
+  const composerContinue = !busy && status !== "closed" && !queueEditId && !draft.trim() && attachments.length === 0 &&
+    ((interrupted && supported.has("resume_pending")) || (failedRun && supported.has("prompt")));
+  const localSlash = attachments.length === 0 && LOCAL_SLASH_COMMANDS.has(draft.trim().split(/\s+/, 1)[0]);
+  const t = useCallback(
+    (key: MessageKey, values?: Record<string, string | number>) =>
+      translate(language, key, values),
+    [language],
+  );
+  const connectionLabel = t(
+    (status === "awaiting_input" ? "waitingForAnswer" : status) as MessageKey,
+  );
+  const current = sessions.find((session) => session.sessionId === sessionId);
+  const sidebarSessions = useMemo(
+    () =>
+      sessions.map((entry) =>
+        entry.sessionId === sessionId
+          ? { ...entry, status: dialog ? "awaiting_input" : status }
+          : entry,
+      ),
+    [sessions, sessionId, status, dialog],
+  );
+  const mobileSessionResults = useMemo(() => {
+    const query = mobileSessionQuery.trim().toLowerCase();
+    return [...sidebarSessions]
+      .filter((entry) => !entry.archived)
+      .filter((entry) => {
+        if (!query) return true;
+        const projectName =
+          projects.find((item) => item.id === entry.projectId)?.name ?? "";
+        return `${entry.title} ${projectName}`.toLowerCase().includes(query);
+      })
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+  }, [mobileSessionQuery, projects, sidebarSessions]);
+  const project = projects.find((entry) => entry.id === projectId);
+  const activeSession = sidebarSessions.find(
+    (entry) => entry.sessionId === sessionId,
+  );
+  const activeSessionRunning = [
+    "running",
+    "starting",
+    "awaiting_input",
+  ].includes(activeSession?.status ?? "");
+  const slashCommands = useMemo<SlashCommand[]>(() => {
+    const model = models.find(
+      (entry) =>
+        entry.id === runtime?.modelId && entry.provider === runtime?.provider,
+    );
+    return [
+      {
+        name: "/model",
+        usage: "/model <provider/model or name>",
+        hint: t("slashModel", {
+          value: model?.name ?? runtime?.modelId ?? t("unknownModel"),
+        }),
+        enabled: supported.has("set_model"),
+      },
+      {
+        name: "/thinking",
+        usage: "/thinking <level>",
+        hint: t("slashThinking", {
+          value: valueLabel(language, runtime?.thinkingLevel ?? "—"),
+        }),
+        enabled: supported.has("set_thinking_level"),
+      },
+      {
+        name: "/tools",
+        usage: "/tools",
+        hint: t("slashTools"),
+        enabled: supported.has("get_available_tools"),
+      },
+      {
+        name: "/compact",
+        usage: "/compact [instructions]",
+        hint: t("slashCompact"),
+        enabled: supported.has("compact"),
+      },
+      {
+        name: "/continue",
+        usage: "/continue",
+        hint: t("slashContinue"),
+        enabled: supported.has("resume_pending"),
+      },
+      {
+        name: "/abort",
+        usage: "/abort",
+        hint: t("slashAbort"),
+        enabled: supported.has("abort"),
+      },
+      {
+        name: "/new",
+        usage: "/new",
+        hint: t("slashNew"),
+        enabled: true,
+      },
+      {
+        name: "/help",
+        usage: "/help",
+        hint: t("slashHelp"),
+        enabled: true,
+      },
+    ];
+  }, [models, runtime, supported, language, t]);
+
+  const slashMatches = useMemo(() => {
+    const query = draft.trim().toLowerCase();
+    if (!query.startsWith("/")) return [];
+    if (/\s/.test(query)) return [];
+    return slashCommands.filter((command) => command.name.startsWith(query));
+  }, [draft, slashCommands]);
+
+  const showNextDialog = useCallback(() => {
+    const next = dialogRequests.current.values().next().value ?? null;
+    const id = next?.requestId ?? "";
+    if (id !== activeDialogId.current) {
+      activeDialogId.current = id;
+      dialogRevision.current++;
+      setDialogBusy(false);
+      setDialogAnswer("");
+    }
+    setDialog(next);
+  }, []);
+
+  const applyEvent = useCallback(
+    (event: SeqEvent, seq: number) => {
+      // Presentation only: observe the same deduplicated data, never the protocol cursor.
+      traceEvent(event, seq);
+      switch (event.type) {
+        case "agent_start":
+        case "operation_accepted":
+          setRows((previous) => previous.filter((row) => row.id !== "retry-note"));
+          setRunActive(true);
+          setStatus("running");
+          setInterrupted(false);
+          setFailedRun(false);
+          break;
+        case "agent_settled": {
+          setRows(stopToolTimers);
+          setRunActive(false);
+          dialogRequests.current.clear();
+          activeDialogId.current = "";
+          setDialog(null);
+          dialogRevision.current++;
+          setDialogBusy(false);
+          setStatus("ready");
+          setInterrupted(Boolean(event.pendingResume));
+          setRecoveryNoticeDismissed(false);
+          const outcome = String(event.outcome ?? "settled");
+          const settlement: SettlementIdentity = {
+            outcome,
+            error: shortReason(event.error) || undefined,
+            runId: typeof event.runId === "string" ? event.runId : undefined,
+            seq: seq > 0 ? seq : undefined,
+          };
+          notifySessionCompletion(
+            activeSessionRef.current,
+            sessionTitles.current.get(activeSessionRef.current),
+            settlement,
+            seq,
+          );
+          const aborted =
+            event.aborted && outcome !== "aborted" ? " · aborted" : "";
+          const failure = [
+            "failed",
+            "error",
+            "interrupted",
+            "aborted",
+            "stopped",
+          ].includes(outcome) || event.aborted === true;
+          setFailedRun(failure);
+          const errorReason = shortReason(event.error);
+          const reason = errorReason ? ` · ${errorReason}` : "";
+          const summary =
+            typeof event.summary === "string" && event.summary.trim()
+              ? event.summary
+              : `Run ${outcome}${aborted}${reason}`;
+          if (failure && errorReason) setError(errorReason);
+          else if (outcome === "completed") setError("");
+          setRows((previous) => [
+            ...previous.filter(
+              (row) =>
+                (failure || row.id !== "retry-note") &&
+                row.id !== `settled-${String(event.runId ?? seq)}` &&
+                (row.kind !== "note" ||
+                  row.translation?.key !== "restoredRun" ||
+                  String(row.translation.values?.outcome ?? "") !== outcome),
+            ),
+            {
+              kind: "note",
+              id: `settled-${String(event.runId ?? seq)}`,
+              text: summary,
+              translation:
+                typeof event.summary === "string" && event.summary.trim()
+                  ? undefined
+                  : {
+                      key: "liveRun",
+                      values: {
+                        outcome,
+                        reason,
+                        aborted: aborted ? "aborted" : "",
+                      },
+                    },
+            },
+          ]);
+          setSettleTick((tick) => tick + 1);
+          break;
+        }
+        case "ui_dialog_request": {
+          const request = event as unknown as UiDialog;
+          if (request.requestId && request.ui) {
+            dialogRequests.current.set(request.requestId, request);
+            showNextDialog();
+            setStatus("awaiting_input");
+          }
+          break;
+        }
+        case "ui_dialog_closed":
+          if (!dialogRequests.current.delete(String(event.requestId ?? "")))
+            break;
+          showNextDialog();
+          setStatus((status) =>
+            dialogRequests.current.size
+              ? "awaiting_input"
+              : status === "awaiting_input"
+                ? "running"
+                : status,
+          );
+          break;
+        case "host_error":
+          setStatus("error");
+          setError(String(event.error ?? "Native host error"));
+          break;
+        case "host_closed":
+          setRows(stopToolTimers);
+          setRunActive(false);
+          dialogRequests.current.clear();
+          activeDialogId.current = "";
+          hostClosedRef.current = true;
+          setStatus("closed");
+          setDialog(null);
+          break;
+        case "retry_scheduled": {
+          const attempt = Number(event.attempt ?? 1);
+          const max = Number(event.maxRetries ?? 0);
+          const retryReason = shortReason(event.error);
+          if (retryReason) setError(retryReason);
+          setRows((previous) => [
+            ...previous.filter((row) => row.id !== "retry-note"),
+            {
+              kind: "note",
+              id: "retry-note",
+              text: `Retrying ${attempt}/${max} · ${shortReason(event.error)}`,
+              translation: {
+                key: "retryMessage",
+                values: { attempt, max, reason: shortReason(event.error) },
+              },
+            },
+          ]);
+          break;
+        }
+        case "message_start": {
+          if (roleOf(event.message) === "user") {
+            const text = textOf(event.message);
+            const prefix = `u${seq}`;
+            currentUser.current = prefix;
+            const initial = rowsFromUser(event.message, prefix);
+            if (initial.length > 0)
+              setRows((previous) => {
+                const optimistic = previous.find(
+                  (row) =>
+                    row.kind === "text" &&
+                    row.role === "user" &&
+                    row.id.startsWith("local-") &&
+                    row.text === text,
+                );
+                return [
+                  ...previous.filter((row) => row.id !== optimistic?.id),
+                  ...initial,
+                ];
+              });
+            break;
+          }
+          if (roleOf(event.message) !== "assistant") break;
+          const prefix = `m${seq}`;
+          currentAssistant.current = prefix;
+          const initial = rowsFromAssistant(
+            (event.message ?? {}) as Record<string, unknown>,
+            prefix,
+          );
+          if (initial.length > 0)
+            setRows((previous) => [...previous, ...initial]);
+          break;
+        }
+        case "message_update":
+        case "message_end": {
+          if (roleOf(event.message) === "user") {
+            if (event.type === "message_end") {
+              const text = textOf(event.message);
+              const prefix = currentUser.current ?? `u${seq}`;
+              currentUser.current = null;
+              const rebuilt = rowsFromUser(event.message, prefix);
+              if (rebuilt.length > 0)
+                setRows((previous) => {
+                  const optimistic = previous.find(
+                    (row) =>
+                      row.kind === "text" &&
+                      row.role === "user" &&
+                      row.id.startsWith("local-") &&
+                      row.text === text,
+                  );
+                  return [
+                    ...withoutPrefix(previous, prefix).filter(
+                      (row) => row.id !== prefix && row.id !== optimistic?.id,
+                    ),
+                    ...rebuilt,
+                  ];
+                });
+            }
+            break;
+          }
+          if (roleOf(event.message) !== "assistant") break;
+          if (event.type === "message_end") {
+            const stats = latestMessageStats([event.message]);
+            if (stats)
+              setMessageStats({ sessionId: activeSessionRef.current, stats });
+          }
+          const prefix = currentAssistant.current ?? `restored-${seq}`;
+          currentAssistant.current = prefix;
+          const rebuilt = rowsFromAssistant(
+            (event.message ?? {}) as Record<string, unknown>,
+            prefix,
+          );
+          const rebuiltIds = new Set(rebuilt.map((row) => row.id));
+          setRows((previous) => {
+            // A tool row may already hold the result from `tool_execution_end`;
+            // keep that while refreshing the name and arguments it was called with.
+            const priorTools = new Map<string, ToolRow>(
+              previous
+                .filter((row): row is ToolRow => row.kind === "tool")
+                .map((row) => [row.id, row]),
+            );
+            const merged = rebuilt.map((row) => {
+              if (row.kind !== "tool") return row;
+              const prior = priorTools.get(row.id);
+              return prior
+                ? { ...prior, name: row.name, args: row.args ?? prior.args }
+                : row;
+            });
+            return [
+              ...withoutPrefix(previous, prefix).filter(
+                (row) => !(row.kind === "tool" && rebuiltIds.has(row.id)),
+              ),
+              ...merged,
+            ];
+          });
+          break;
+        }
+        case "tool_execution_start":
+          setRows((previous) =>
+            upsertTool(previous, String(event.toolCallId ?? seq), {
+              nativeToolCallId: typeof event.toolCallId === "string" ? event.toolCallId : undefined,
+              name: String(event.toolName ?? "tool"),
+              args: event.args,
+              timing: toolTiming(event.webTiming),
+              status: "running",
+            }),
+          );
+          break;
+        case "tool_execution_update":
+          setRows((previous) =>
+            upsertTool(previous, String(event.toolCallId ?? seq), {
+              nativeToolCallId: typeof event.toolCallId === "string" ? event.toolCallId : undefined,
+              name: String(event.toolName ?? "tool"),
+              args: event.args,
+              result: event.partialResult,
+              images: imageBlocksOf(event.partialResult),
+              timing: toolTiming(event.webTiming),
+              status: "running",
+            }),
+          );
+          break;
+        case "tool_execution_end":
+          setRows((previous) =>
+            upsertTool(previous, String(event.toolCallId ?? seq), {
+              nativeToolCallId: typeof event.toolCallId === "string" ? event.toolCallId : undefined,
+              name: String(event.toolName ?? "tool"),
+              result: event.result,
+              images: imageBlocksOf(event.result),
+              timing: toolTiming(event.webTiming),
+              status: event.isError ? "error" : "done",
+            }),
+          );
+          break;
+        default:
+          break;
+      }
+    },
+    [notifySessionCompletion, showNextDialog, traceEvent],
+  );
+
+  const handleEvent = useCallback(
+    (raw: MessageEvent) => {
+      let event: SeqEvent;
+      try {
+        event = JSON.parse(raw.data) as SeqEvent;
+      } catch {
+        return;
+      }
+      const seq = Number(raw.lastEventId ?? 0);
+      // Replay and live fan-out overlap on purpose; sequence numbers dedupe them.
+      if (seq && seq <= lastSeq.current) return;
+      if (seq) lastSeq.current = seq;
+      setSeen((count) => count + 1);
+      applyEvent(event, seq);
+    },
+    [applyEvent],
+  );
+
+  const clearAccess = useCallback(() => {
+    diagnosticsRevision.current++;
+    navigationRevision.current++;
+    sessionListRevision.current++;
+    sessionListRequest.current = null;
+    sessionListValue.current = null;
+    sessionListInitialized.current = false;
+    sessionTitles.current.clear();
+    notifiedSettlements.current.clear();
+    setSessionNotifications([]);
+    initialSelectionError.current = "";
+    activeSessionRef.current = "";
+    sessionReadsAbort.current?.abort();
+    diagnosticsAbort.current?.abort();
+    rowsBySession.current.clear();
+    clearTrace();
+    setTraceOpen(false);
+    source.current?.close();
+    setAuthenticated(false);
+    setAuthRequired(true);
+    setCapabilities(null);
+    setSessionId("");
+    setSessions([]);
+    setRows([]);
+    earlierPage.current = null;
+    dialogRequests.current.clear();
+    activeDialogId.current = "";
+    setDialog(null);
+    resolveTextRequest(null);
+    setRuntime(null);
+    setModels([]);
+    setAuthProviders([]);
+    setAuthProvider("");
+    setApiKeyDraft("");
+    credentialRevision.current++;
+    setAuthMessage(null);
+    setPasswordDraft("");
+    setProjectDialog(false);
+    setRenameTarget(null);
+    setSettingsOpen(false);
+    setDraft("");
+    clearDrafts();
+  }, [clearDrafts, clearTrace]);
+
+  const refreshSessions = useCallback(
+    (force = true) => {
+      if (!force && sessionListRequest.current)
+        return sessionListRequest.current;
+      const revision = ++sessionListRevision.current;
+      const latest = () =>
+        sessionListRequest.current ?? sessionListValue.current;
+      const pending = api
+        .listSessions()
+        .then(
+          ({ sessions: list }) => {
+            if (revision !== sessionListRevision.current) return latest();
+            const previous = sessionListValue.current;
+            if (sessionListInitialized.current) {
+              for (const entry of list) {
+                const currentKey = settlementKey(
+                  entry.latestSettlement,
+                  entry.lastSeq,
+                );
+                if (!currentKey) continue;
+                const previousEntry = previous?.find(
+                  (item) => item.sessionId === entry.sessionId,
+                );
+                if (
+                  currentKey ===
+                  settlementKey(
+                    previousEntry?.latestSettlement,
+                    previousEntry?.lastSeq,
+                  )
+                )
+                  continue;
+                notifySessionCompletion(
+                  entry.sessionId,
+                  entry.title,
+                  entry.latestSettlement,
+                  entry.lastSeq,
+                );
+              }
+            } else {
+              for (const entry of list) {
+                const currentKey = settlementKey(
+                  entry.latestSettlement,
+                  entry.lastSeq,
+                );
+                if (currentKey)
+                  notifiedSettlements.current.add(`${entry.sessionId}:${currentKey}`);
+              }
+            }
+            for (const entry of list) {
+              if (entry.title) sessionTitles.current.set(entry.sessionId, entry.title);
+            }
+            sessionListInitialized.current = true;
+            sessionListValue.current = list;
+            setSessions(list);
+            return list;
+          },
+          (cause) => {
+            if (revision !== sessionListRevision.current) return latest();
+            sessionListValue.current = null;
+            if (cause instanceof ApiError && cause.status === 401)
+              clearAccess();
+            setError(errorText(cause));
+            return null;
+          },
+        )
+        .finally(() => {
+          if (sessionListRequest.current === pending)
+            sessionListRequest.current = null;
+        });
+      sessionListRequest.current = pending;
+      return pending;
+    },
+    [clearAccess, notifySessionCompletion],
+  );
+
+  const createSession = useCallback(
+    async (selectedProject?: string) => {
+      if (creatingSessionRef.current) return;
+      creatingSessionRef.current = true;
+      const navigation = navigationRevision.current;
+      const targetProject = selectedProject || projectRef.current;
+      setCreatingSession(true);
+      try {
+        setError("");
+        const created = await api.createSession(targetProject || undefined);
+        if (navigation !== navigationRevision.current) {
+          void refreshSessions();
+          return;
+        }
+        navigationRevision.current++;
+        if (targetProject) {
+          projectRef.current = targetProject;
+          setProjectId(targetProject);
+        }
+        activeSessionRef.current = created.sessionId;
+        setSessionId(created.sessionId);
+        if (window.innerWidth < 768) setSidebar(false);
+        const url = new URL(location.href);
+        url.searchParams.set("session", created.sessionId);
+        history.replaceState(null, "", url);
+        void refreshSessions();
+      } catch (cause) {
+        if (navigation !== navigationRevision.current) return;
+        if (!activeSessionRef.current) setStatus("error");
+        setError(errorText(cause));
+      } finally {
+        creatingSessionRef.current = false;
+        setCreatingSession(false);
+      }
+    },
+    [refreshSessions],
+  );
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(TOOL_NAME_MODE_KEY, toolNameMode);
+    } catch {
+      /* optional display preference */
+    }
+  }, [toolNameMode]);
+  useEffect(() => {
+    const keydown = (event: KeyboardEvent) => {
+      if (
+        !authChecked ||
+        (authRequired && !authenticated) ||
+        document.querySelector("dialog[open], .dialog-backdrop")
+      )
+        return;
+      if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+      const key = event.key.toLowerCase();
+      if (key === "n" && !event.shiftKey) {
+        event.preventDefault();
+        void createSession();
+      }
+      if (key === "b") {
+        event.preventDefault();
+        setSidebar((value) => !value);
+      }
+      if (key === ",") {
+        event.preventDefault();
+        setSettingsOpen(true);
+      }
+    };
+    window.addEventListener("keydown", keydown);
+    return () => window.removeEventListener("keydown", keydown);
+  }, [createSession, authChecked, authRequired, authenticated]);
+
+  useEffect(() => {
+    if (!authChecked || (authRequired && !authenticated)) return;
+    const timer = window.setInterval(() => void refreshSessions(false), 5000);
+    return () => window.clearInterval(timer);
+  }, [authChecked, authRequired, authenticated, refreshSessions]);
+
+  useEffect(() => {
+    saveLanguage(language);
+    document.documentElement.lang = language === "zh" ? "zh-CN" : "en";
+  }, [language]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setAuthChecked(false);
+    setAccessCheckFailed(false);
+    setAuthError("");
+    void (async () => {
+      try {
+        const auth = await api.auth();
+        if (cancelled) return;
+        setAuthRequired(auth.required);
+        setAuthenticated(auth.authenticated || !auth.required);
+      } catch (cause) {
+        if (cancelled) return;
+        setAuthRequired(true);
+        setAuthenticated(false);
+        setAccessCheckFailed(true);
+        setAuthError(errorText(cause));
+      } finally {
+        if (!cancelled) setAuthChecked(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [authRevision]);
+
+  useEffect(() => {
+    if (!authChecked || (authRequired && !authenticated)) return;
+    let cancelled = false;
+    let availableProjects: Project[] = [];
+    setLoadingSession(true);
+    void (async () => {
+      try {
+        const caps = await api.capabilities();
+        if (cancelled) return;
+        setCapabilities(caps);
+        if (caps.supportedActions?.includes("projects")) {
+          const result = await api.projects();
+          if (cancelled) return;
+          availableProjects = result.projects;
+          setProjects(result.projects);
+          setProjectsRoot(result.projectsRoot ?? "");
+          const defaultProject =
+            result.projects.find(
+              (item) => item.id === result.defaultProjectId && !item.archived,
+            ) ?? result.projects.find((item) => !item.archived);
+          projectRef.current = defaultProject?.id ?? result.defaultProjectId;
+          setProjectId(projectRef.current);
+        }
+        const list = await refreshSessions();
+        if (cancelled || !list) return;
+        const requested = new URLSearchParams(location.search).get("session");
+        const requestedSession = list.find((session) => session.sessionId === requested);
+        const blockedRequest = sessionSelectionError(requestedSession);
+        const reusable = list.filter(
+          (session) =>
+            session.status !== "closed" &&
+            !session.archived && !session.deleting &&
+            (!session.projectId ||
+              availableProjects.some((project) =>
+                project.id === session.projectId && !project.archived,
+              )),
+        );
+        const match =
+          (blockedRequest ? undefined : requestedSession) ??
+          reusable.find((session) => session.sessionId === activeSessionRef.current) ??
+          reusable.sort((a, b) => b.updatedAt - a.updatedAt)[0];
+        const blocked = blockedRequest ?? (!match
+          ? sessionSelectionError(list.find((session) => session.archived || session.deleting))
+          : null);
+        const selectionChanges = match && match.sessionId !== activeSessionRef.current;
+        if (match) select(match.sessionId, match.projectId);
+        else if (blocked) {
+          select("");
+          setLoadingSession(false);
+        } else await createSession();
+        if (blocked) {
+          const message = errorText(blocked);
+          initialSelectionError.current = selectionChanges ? message : "";
+          setError(message);
+        }
+      } catch (cause) {
+        if (cancelled) return;
+        setStatus("error");
+        setError(errorText(cause));
+        setAccessCheckFailed(true);
+        setAuthenticated(false);
+        setAuthRequired(true);
+        setCapabilities(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    authChecked,
+    authRequired,
+    authenticated,
+    createSession,
+    refreshSessions,
+  ]);
+
+  useEffect(() => {
+    if (!capabilities) return;
+    diagnosticsRevision.current++;
+    diagnosticsAbort.current?.abort();
+    setSessionHydrated(false);
+    dialogRequests.current.clear();
+    activeDialogId.current = "";
+    earlierPage.current = null;
+    setRows(sessionId ? (rowsBySession.current.get(sessionId) ?? []) : []);
+    setRuntime(null);
+    setHistory(null);
+    setQueueItems([]);
+    setAuthProviders([]);
+    setAuthProvider("");
+    setApiKeyDraft("");
+    setAuthMessage(null);
+    setQueueDraft("");
+    setQueueEditId(null);
+    setModels([]);
+    setLeafId("");
+    setHistoryHasMore(false);
+    earlierRequest.current = null;
+    autoEarlierCursor.current = null;
+    continueEarlier.current = null;
+    setLoadingEarlier(false);
+    setMutationPending(false);
+    setDialogBusy(false);
+    dialogRevision.current++;
+    setHistoryLoading(false);
+    sendingRevision.current++;
+    sendingRef.current = false;
+    setSending(false);
+    setLevels([]);
+    setSeen(0);
+    setError(initialSelectionError.current);
+    initialSelectionError.current = "";
+    setConnectionFailed(false);
+    hostClosedRef.current = false;
+    setStatus("connecting");
+    setLoadingSession(Boolean(sessionId));
+    setNativeMessageQueries(false);
+    setInterrupted(false);
+    setFailedRun(false);
+    setRecoveryNoticeDismissed(false);
+    setDialog(null);
+    setDialogAnswer("");
+    setFirstId("");
+    setHasMore(false);
+    lastSeq.current = 0;
+    currentAssistant.current = null;
+    currentUser.current = null;
+    followingRef.current = true;
+    setFollowing(true);
+    setDraft(draftBySession.current.get(sessionId) ?? "");
+    if (!sessionId) {
+      setStatus("ready");
+      setLoadingSession(false);
+      return;
+    }
+
+    let cancelled = false;
+    const requests = new AbortController();
+    sessionReadsAbort.current = requests;
+    const isCurrent = () =>
+      !cancelled && !requests.signal.aborted &&
+      activeSessionRef.current === sessionId && sessionReadsAbort.current === requests;
+    let stream: EventSource | null = null;
+    let refreshingTranscript = false;
+    let bufferedEvents: MessageEvent[] = [];
+    const failConnection = (cause: unknown) => {
+      if (!isCurrent()) return;
+      if (cause instanceof ApiError && cause.status === 401) {
+        cancelled = true;
+        requests.abort();
+        clearAccess();
+        return;
+      }
+      setStatus("error");
+      setLoadingSession(false);
+      setConnectionFailed(true);
+      setError(errorText(cause));
+    };
+    const restoreSnapshotStatus = (
+      snapshot: Awaited<ReturnType<typeof snapshotOf>>,
+    ) => {
+      setNativeMessageQueries(["get_message_summaries", "get_message_window"].every((command) => snapshot.supportedCommands?.includes(command)));
+      setMessageStats({
+        sessionId,
+        stats: latestMessageStats(snapshot.messages),
+      });
+      if (snapshot.status) {
+        setStatus(snapshot.status);
+        setRunActive(["running", "awaiting_input"].includes(snapshot.status));
+      }
+      if (
+        snapshot.status ||
+        snapshot.pendingDialog ||
+        snapshot.pendingDialogs
+      ) {
+        const requests =
+          snapshot.pendingDialogs ??
+          (snapshot.pendingDialog ? [snapshot.pendingDialog] : []);
+        dialogRequests.current = new Map(
+          requests.map((request) => [request.requestId, request as UiDialog]),
+        );
+        showNextDialog();
+      }
+      if (dialogRequests.current.size) {
+        setStatus("awaiting_input");
+      }
+    };
+
+    // Direct prompts are persisted by the native harness without user message
+    // events. Refresh at run boundaries so every open page sees that input.
+    const refreshTranscript = async () => {
+      if (refreshingTranscript || !isCurrent()) return;
+      refreshingTranscript = true;
+      try {
+        const snapshot = await snapshotOf(sessionId, {
+          ...FAST_SNAPSHOT_OPTIONS,
+          signal: requests.signal,
+        });
+        if (!isCurrent()) return;
+        traceSnapshot(snapshot, "refresh");
+        restoreSnapshotStatus(snapshot);
+        currentAssistant.current = null;
+        currentUser.current = null;
+        const restored = prependRows(
+          earlierPage.current?.rows ?? [],
+          rowsFromMessages(snapshot.messages),
+        );
+        setRows((previous) => restoreRowsWithNotes(restored, previous));
+        setPersistedHistory(snapshot.history ?? null);
+        setLeafId(snapshot.leafId ?? "");
+        setInterrupted(Boolean(snapshot.pendingResume));
+        setFailedRun(["failed", "error", "interrupted", "aborted", "stopped"].includes(String(snapshot.latestSettlement?.outcome ?? "")) || snapshot.latestSettlement?.aborted === true);
+        const snapshotError = shortReason(snapshot.latestSettlement?.error);
+        if (snapshotError) setError(snapshotError);
+        setRecoveryNoticeDismissed(false);
+        setFirstId(earlierPage.current?.firstId ?? snapshot.firstId ?? "");
+        setHasMore(earlierPage.current?.hasMore ?? Boolean(snapshot.hasMore));
+        for (const entry of eventsAfterSnapshot(
+          snapshot.messages,
+          snapshot.events,
+        ))
+          applyEvent(entry.event, entry.seq);
+        lastSeq.current = snapshot.lastSeq;
+      } catch (cause) {
+        if (!isCurrent()) return;
+        if (cause instanceof ApiError && cause.status === 401) {
+          cancelled = true;
+          requests.abort();
+          clearAccess();
+          return;
+        }
+        setError(errorText(cause));
+      } finally {
+        refreshingTranscript = false;
+        const pending = bufferedEvents;
+        bufferedEvents = [];
+        if (isCurrent()) {
+          let anotherBoundary = false;
+          for (const raw of pending) {
+            if (Number(raw.lastEventId) <= lastSeq.current) continue;
+            const type = raw.type;
+            handleEvent(raw);
+            anotherBoundary ||=
+              type === "agent_start" || type === "agent_settled";
+          }
+          if (anotherBoundary) void refreshTranscript();
+        }
+      }
+    };
+
+    const connect = (after: number) => {
+      const next = new EventSource(
+        `/api/v1/sessions/${sessionId}/events?after=${after}`,
+      );
+      stream = next;
+      source.current = next;
+      let rearmPending = false;
+      next.addEventListener("resync_required", () => {
+        next.close();
+        if (isCurrent()) setConnectionRevision((value) => value + 1);
+      });
+      let priorStatus = "ready";
+      next.onopen = () => {
+        if (!isCurrent()) return;
+        // A stream that opens proves the host is healthy again; refill the budget
+        // so a later genuine retirement still gets its own recovery attempt.
+        rearmBudget.current = 0;
+        setStatus((previous) =>
+          previous === "reconnecting" ? priorStatus : previous,
+        );
+      };
+      for (const name of EVENT_TYPES)
+        next.addEventListener(name, (raw) => {
+          if (!isCurrent()) return;
+          const event = raw as MessageEvent;
+          if (refreshingTranscript) {
+            bufferedEvents.push(event);
+            if (bufferedEvents.length > 512) {
+              next.close();
+              setConnectionRevision((value) => value + 1);
+            }
+            return;
+          }
+          if (Number(event.lastEventId) <= lastSeq.current) return;
+          handleEvent(event);
+          if (name === "agent_start" || name === "agent_settled")
+            void refreshTranscript();
+        });
+      next.onerror = () => {
+        if (!isCurrent()) return;
+        // `host_closed` is the native host shutting down on purpose, not an idle
+        // retirement. Reviving it here would silently undo that decision.
+        if (hostClosedRef.current) return;
+        setStatus((previous) => {
+          if (previous === "closed") return previous;
+          if (previous !== "reconnecting") priorStatus = previous;
+          return "reconnecting";
+        });
+        // EventSource retries 404 forever without ever reopening the host, so a
+        // retired session would stay stuck on "reconnecting". Probing first keeps
+        // an ordinary reconnect (upload EOF, proxy hiccup) from reopening a host
+        // that is still alive.
+        if (rearmPending) return;
+        rearmPending = true;
+        void (async () => {
+          const retired = await hostIsRetired(sessionId, requests.signal);
+          if (!isCurrent()) return;
+          // A live host only lost this stream. EventSource reconnects on its own,
+          // so rebuilding the whole session view here would discard its state.
+          if (retired !== true) return;
+          if (rearmBudget.current >= MAX_REARMS) {
+            failConnection(new Error(t("sessionUnavailable")));
+            return;
+          }
+          rearmBudget.current += 1;
+          if (!(await reopenHost(sessionId, requests.signal))) {
+            if (isCurrent()) failConnection(new Error(t("sessionUnavailable")));
+            return;
+          }
+          if (isCurrent()) setConnectionRevision((value) => value + 1);
+        })();
+      };
+    };
+
+    void (async () => {
+      // Open is idempotent for a live host. Prioritize the bounded transcript:
+      // native reads can share a queue, so even a parallel get_state can delay it.
+      try {
+        await api.openSession(sessionId, requests.signal);
+        if (!isCurrent()) return;
+        void refreshSessions();
+      } catch (cause) {
+        failConnection(cause);
+        return;
+      }
+
+      const readRuntime = async () => {
+        const state = await api.runtimeState(sessionId, requests.signal);
+        if (isCurrent()) {
+          // A settlement or user action may already have refreshed metadata.
+          // This initial read fills missing fields, not newer authoritative data.
+          setRuntime((previous) => previous ? { ...state, ...previous } : state);
+        }
+        return state;
+      };
+      let stateLoaded = false;
+      let after = 0;
+      try {
+        const snapshot = capabilities.supportedCommands.includes("get_messages")
+          ? await snapshotOf(sessionId, {
+              ...FAST_SNAPSHOT_OPTIONS,
+              signal: requests.signal,
+            })
+          : null;
+        if (!isCurrent()) return;
+
+        if (snapshot) {
+          traceSnapshot(snapshot, "initial");
+          setRows((previous) => {
+            const restored = rowsFromMessages(snapshot.messages);
+            return restoreRowsWithNotes(restored, previous);
+          });
+          setPersistedHistory(snapshot.history ?? null);
+          setLeafId(snapshot.leafId ?? "");
+          setInterrupted(Boolean(snapshot.pendingResume));
+          setFailedRun(["failed", "error", "interrupted", "aborted", "stopped"].includes(String(snapshot.latestSettlement?.outcome ?? "")) || snapshot.latestSettlement?.aborted === true);
+          const snapshotError = shortReason(snapshot.latestSettlement?.error);
+          if (snapshotError) setError(snapshotError);
+          setRecoveryNoticeDismissed(false);
+          setFirstId(snapshot.firstId ?? "");
+          setHasMore(Boolean(snapshot.hasMore));
+        }
+        // Older snapshots lack lifecycle status. Paint their rows now, but seed
+        // status before replay so a later runtime read cannot undo replay events.
+        if (!snapshot?.status) {
+          const state = await readRuntime();
+          if (!isCurrent()) return;
+          stateLoaded = true;
+          setRunActive(Boolean(state.activeOperation));
+          setStatus(state.activeOperation ? "running" : "ready");
+        }
+        if (snapshot) {
+          restoreSnapshotStatus(snapshot);
+          for (const entry of eventsAfterSnapshot(
+            snapshot.messages,
+            snapshot.events,
+          )) {
+            applyEvent(entry.event, entry.seq);
+          }
+          lastSeq.current = snapshot.lastSeq;
+          after = snapshot.lastSeq;
+          setSeen(snapshot.events.length);
+        }
+      } catch (cause) {
+        failConnection(cause);
+        return;
+      }
+      if (!isCurrent()) return;
+      connect(after);
+      setLoadingSession(false);
+
+      // Snapshot + replay own lifecycle status. Metadata never delays first
+      // paint/SSE or overwrites a newer running, settled, closed or dialog state.
+      if (!stateLoaded) {
+        try {
+          await readRuntime();
+        } catch (cause) {
+          if (!isCurrent()) return;
+          if (cause instanceof ApiError && cause.status === 401) {
+            failConnection(cause);
+            return;
+          }
+          setError(errorText(cause));
+        }
+      }
+      // Warm slash-command catalogs sequentially, only after the primary reads.
+      const warmups: Array<() => Promise<void>> = [];
+      if (capabilities.supportedCommands.includes("get_available_models")) {
+        warmups.push(async () => {
+          const data = await api.models(sessionId, requests.signal);
+          if (isCurrent()) setModels(data.models ?? []);
+        });
+      }
+      if (capabilities.supportedCommands.includes("get_available_thinking_levels")) {
+        warmups.push(async () => {
+          const data = await api.thinkingLevels(sessionId, requests.signal);
+          if (isCurrent()) setLevels(data.levels ?? []);
+        });
+      }
+      for (const warm of warmups) {
+        if (!isCurrent()) return;
+        try {
+          await warm();
+        } catch (cause) {
+          if (!isCurrent()) return;
+          if (cause instanceof ApiError && cause.status === 401) {
+            failConnection(cause);
+            return;
+          }
+        }
+      }
+      if (isCurrent()) setSessionHydrated(true);
+    })();
+
+    return () => {
+      cancelled = true;
+      requests.abort();
+      if (sessionReadsAbort.current === requests) sessionReadsAbort.current = null;
+      diagnosticsAbort.current?.abort();
+      stream?.close();
+      if (source.current === stream) source.current = null;
+    };
+  }, [
+    applyEvent,
+    capabilities,
+    clearAccess,
+    handleEvent,
+    sessionId,
+    connectionRevision,
+    showNextDialog,
+    traceSnapshot,
+  ]);
+
+  useEffect(() => {
+    if (rowsSessionRef.current !== sessionId) {
+      rowsSessionRef.current = sessionId;
+      return;
+    }
+    if (!sessionId) return;
+    rowsBySession.current.set(sessionId, rows);
+    if (rowsBySession.current.size > 24) {
+      const oldest = rowsBySession.current.keys().next().value;
+      if (oldest && oldest !== sessionId) rowsBySession.current.delete(oldest);
+    }
+  }, [rows, sessionId]);
+
+  const refreshDiagnostics = useCallback(
+    async (id: string) => {
+      if (activeSessionRef.current !== id) return;
+      diagnosticsAbort.current?.abort();
+      const controller = new AbortController();
+      diagnosticsAbort.current = controller;
+      const revision = ++diagnosticsRevision.current;
+      const current = () =>
+        !controller.signal.aborted &&
+        activeSessionRef.current === id &&
+        diagnosticsRevision.current === revision;
+      const jobs: Array<() => Promise<void>> = [];
+      if (supported.has("get_queue")) {
+        jobs.push(async () => {
+          const value = await api.queue(id, showQueueHistory, controller.signal);
+          if (!current()) return;
+          const items = value.items ?? [];
+          setQueueItems((previous) =>
+            items.length === 0 &&
+            (runActive || queueRunSubmission.current.has(id))
+              ? previous.filter(isEditableQueueItem)
+              : items,
+          );
+        });
+      }
+      if (supported.has("get_stats")) {
+        jobs.push(async () => {
+          const rawStats = await api.stats(id, controller.signal);
+          if (!current()) return;
+          const stats = normalizeRuntimeStats(rawStats);
+          if (stats) setRuntime((previous) => previous ? { ...previous, stats } : { stats });
+        });
+      }
+      if (supported.has("get_history")) {
+        jobs.push(async () => {
+          const value = await api.history(id, {}, controller.signal);
+          if (!current()) return;
+          setHistory(value);
+          setHistoryHasMore(value.hasMore);
+        });
+      }
+      if (actions.has("provider_auth") && supported.has("get_auth_status")) {
+        jobs.push(async () => {
+          const value = await api.authStatus(id, controller.signal);
+          if (!current()) return;
+          setAuthProviders(value.providers ?? []);
+          setAuthProvider((previous) =>
+            value.providers?.some((provider) => provider.provider === previous)
+              ? previous
+              : value.providers?.[0]?.provider || "",
+          );
+        });
+      }
+      try {
+        // Do not queue every native read at once: navigation can abort this
+        // browser read and, importantly, prevent the remaining jobs being sent.
+        for (const job of jobs) {
+          if (!current()) break;
+          await job().catch((cause) => {
+            if (current() && cause instanceof ApiError && cause.status === 401) {
+              controller.abort();
+              clearAccess();
+            }
+          });
+        }
+      } finally {
+        if (diagnosticsAbort.current === controller) diagnosticsAbort.current = null;
+      }
+    },
+    [supported, actions, showQueueHistory, clearAccess, runActive],
+  );
+
+  useEffect(() => {
+    if (!sessionId || loadingSession || !sessionHydrated) return;
+    const timer = window.setTimeout(() => {
+      void refreshDiagnostics(sessionId);
+    }, 450);
+    return () => {
+      window.clearTimeout(timer);
+      diagnosticsAbort.current?.abort();
+    };
+  }, [refreshDiagnostics, sessionId, settleTick, loadingSession, sessionHydrated]);
+
+  function persistedSettlementRows(value: HistoryResponse | null): Row[] {
+    if (!value) return [];
+    const record = [...value.records]
+      .reverse()
+      .find((entry) => entry.type === "operation_finished");
+    if (!record) return [];
+
+    const outcome = String(record.outcome ?? "settled");
+    return [
+      {
+        kind: "note" as const,
+        id: "restored-settlement",
+        text: `Run ${outcome} · restored from session history`,
+        translation: {
+          key: "restoredRun" as const,
+          values: { outcome },
+        },
+      },
+    ];
+  }
+
+  function historyRecordLabel(record: Record<string, unknown>): string {
+    const type = String(record.type ?? "record");
+    return valueLabel(language, type).replaceAll("_", " ");
+  }
+
+  function historyRecordTime(record: Record<string, unknown>): string {
+    const value = record.timestamp ?? record.createdAt ?? record.updatedAt;
+    if (typeof value !== "number" && typeof value !== "string") return "";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+  }
+
+  function redactHistoryValue(value: unknown, key = ""): unknown {
+    if (
+      /api.?key|access.?token|refresh.?token|secret|password|credential/i.test(
+        key,
+      )
+    ) {
+      return "[redacted]";
+    }
+    if (Array.isArray(value)) {
+      return value.map((item) => redactHistoryValue(item));
+    }
+    if (value && typeof value === "object") {
+      return Object.fromEntries(
+        Object.entries(value).map(([entryKey, entryValue]) => [
+          entryKey,
+          redactHistoryValue(entryValue, entryKey),
+        ]),
+      );
+    }
+    return value;
+  }
+
+  function historyRecordDetails(record: Record<string, unknown>): string {
+    return JSON.stringify(redactHistoryValue(record), null, 2);
+  }
+
+  async function refreshSessionDiagnostics() {
+    if (sessionId) await refreshDiagnostics(sessionId);
+  }
+
+  function setPersistedHistory(value: HistoryResponse | null) {
+    setHistory(value);
+    setHistoryHasMore(Boolean(value?.hasMore));
+  }
+
+  const lastRuntimeSettlement = useRef(0);
+  useEffect(() => {
+    // A remembered settlement tick is not a new settlement on session switch.
+    if (lastRuntimeSettlement.current === settleTick) return;
+    lastRuntimeSettlement.current = settleTick;
+    void refreshSessions();
+    if (!sessionId) return;
+    const controller = new AbortController();
+    void api
+      .runtimeState(sessionId, controller.signal)
+      .then((state) => {
+        if (!controller.signal.aborted && activeSessionRef.current === sessionId)
+          setRuntime(state);
+      })
+      .catch(() => {});
+    return () => controller.abort();
+  }, [refreshSessions, sessionId, settleTick]);
+
+  function note(text: string) {
+    noteSeq.current += 1;
+    const id = `cmd-${noteSeq.current}`;
+    setRows((previous) => [...previous, { kind: "note", id, text }]);
+  }
+
+  async function selectModel(entry: ModelDescriptor) {
+    if (!sessionId || modelPending) return;
+    setModelPending(true);
+    setError("");
+    try {
+      await commandData(sessionId, "set_model", {
+        modelId: entry.id,
+        provider: entry.provider,
+      });
+      const state = await api.runtimeState(sessionId);
+      setRuntime(state);
+      note(
+        language === "zh"
+          ? `模型 → ${entry.name} (${entry.provider})`
+          : `Model → ${entry.name} (${entry.provider})`,
+      );
+    } catch (cause) {
+      setError(errorText(cause));
+    } finally {
+      setModelPending(false);
+    }
+  }
+
+  async function selectThinkingLevel(level: string) {
+    if (!sessionId || thinkingPending) return;
+    setThinkingPending(true);
+    setError("");
+    try {
+      await commandData(sessionId, "set_thinking_level", { level });
+      const state = await api.runtimeState(sessionId);
+      setRuntime(state);
+      note(
+        language === "zh"
+          ? `思考深度 → ${valueLabel(language, level)}`
+          : `Thinking level → ${level}`,
+      );
+    } catch (cause) {
+      setError(errorText(cause));
+    } finally {
+      setThinkingPending(false);
+    }
+  }
+
+  /**
+   * Slash commands are a browser-side affordance over the same RPC commands the
+   * Runtime panel uses; nothing here reaches the model as a prompt.
+   */
+  async function runSlash(raw: string) {
+    if (!sessionId) return;
+    const targetSession = sessionId;
+    const navigation = navigationRevision.current;
+    const cursor = lastSeq.current;
+    const priorStatus = status;
+    const priorActive = runActive;
+    const [name = "", ...rest] = raw.trim().split(/\s+/);
+    const arg = rest.join(" ").trim();
+    if ((loadingSession || connectionFailed) && !LOCAL_SLASH_COMMANDS.has(name)) return;
+    updateDraft("");
+    setError("");
+    try {
+      if (name === "/help") {
+        note(
+          slashCommands
+            .filter((command) => command.enabled)
+            .map((command) => `${command.usage} — ${command.hint}`)
+            .join("\n"),
+        );
+        return;
+      }
+      if (name === "/new") {
+        await createSession();
+        return;
+      }
+      if (name === "/compact") {
+        if (!supported.has("compact")) {
+          note("compact is not advertised by this host.");
+          return;
+        }
+        setStatus("running");
+        setRunActive(true);
+        await commandData(
+          sessionId,
+          "compact",
+          arg ? { customInstructions: arg } : {},
+        );
+        return;
+      }
+      if (name === "/continue") {
+        await resumePending();
+        return;
+      }
+      if (name === "/abort") {
+        if (!supported.has("abort")) {
+          note("/abort is not advertised by this host.");
+          return;
+        }
+        if (!busy) {
+          note("Nothing is running.");
+          return;
+        }
+        await abort();
+        return;
+      }
+      if (name === "/tools") {
+        setTraceOpen(false);
+        setPanel(true);
+        note(
+          `${runtime?.activeTools?.length ?? 0} active tools — toggle them in Runtime.`,
+        );
+        return;
+      }
+      if (name === "/model") {
+        if (!supported.has("set_model")) {
+          note("set_model is not advertised by this host.");
+          return;
+        }
+        const available = models.length
+          ? models
+          : ((await api.models(sessionId)).models ?? []);
+        if (navigation !== navigationRevision.current) return;
+        setModels(available);
+        const target = matchModel(available, arg);
+        if (!target) {
+          setTraceOpen(false);
+          setPanel(true);
+          note(
+            arg
+              ? language === "zh"
+                ? `无法唯一确定模型“${arg}”，请使用 服务商/模型ID 或在运行时设置中选择。`
+                : `No unique model matches "${arg}". Use provider/model-id or select it in Runtime.`
+              : `Runtime lists ${available.length} models.`,
+          );
+          return;
+        }
+        await commandData(sessionId, "set_model", {
+          modelId: target.id,
+          provider: target.provider,
+        });
+        const state = await api.runtimeState(sessionId);
+        if (navigation !== navigationRevision.current) return;
+        setRuntime(state);
+        note(`Model → ${target.name} (${target.provider})`);
+        return;
+      }
+      if (name === "/thinking") {
+        if (!supported.has("set_thinking_level")) {
+          note("set_thinking_level is not advertised by this host.");
+          return;
+        }
+        const level = levels.find(
+          (entry) => entry.toLowerCase() === arg.toLowerCase(),
+        );
+        if (!level) {
+          setTraceOpen(false);
+          setPanel(true);
+          note(
+            arg
+              ? `No thinking level "${arg}". Available: ${levels.join(", ")}.`
+              : `Available levels: ${levels.join(", ")}.`,
+          );
+          return;
+        }
+        await commandData(sessionId, "set_thinking_level", { level });
+        const state = await api.runtimeState(sessionId);
+        if (navigation !== navigationRevision.current) return;
+        setRuntime(state);
+        note(`Thinking level → ${level}`);
+        return;
+      }
+      note(`Unknown command ${name}. Try /help.`);
+    } catch (cause) {
+      if (!draftBySession.current.get(targetSession))
+        updateDraft(raw, targetSession);
+      if (navigation !== navigationRevision.current) return;
+      if (name === "/compact" && cursor === lastSeq.current) {
+        setStatus((current) =>
+          current === "reconnecting" ? current : priorStatus,
+        );
+        setRunActive(priorActive);
+      }
+      const text = errorText(cause);
+      setError(text);
+      note(`${name} failed: ${text}`);
+    }
+  }
+
+  async function uploadFiles(files: FileList | File[] | null) {
+    const batch = Array.from(files ?? []);
+    const scope = uploadScope.current;
+    if (!batch.length || !projectId || !sessionId || !scope ||
+        scope.sessionId !== sessionId || scope.projectId !== projectId) return;
+    scope.pending++;
+    setUploading(true);
+    setError("");
+    const current = () => uploadScope.current === scope && !scope.controller.signal.aborted;
+    // Snapshot clipboard/input files immediately, then serialize batches so a
+    // second paste neither disappears nor clears another batch's busy state.
+    uploadQueue.current = uploadQueue.current.then(async () => {
+      try {
+        if (!current()) return;
+        for (const file of batch) {
+          const result = await api.upload(projectId, file, scope.controller.signal);
+          if (!current()) return;
+          const previewUrl = isImageAttachment(file.name, file.type) || isImageAttachment(result.name)
+            ? URL.createObjectURL(file) : undefined;
+          if (previewUrl) attachmentPreviews.current.add(previewUrl);
+          // Keep successful files even if a later file in the batch fails.
+          setAttachments(previous => [...previous, { ...result, previewUrl }]);
+        }
+      } catch (cause) {
+        if (current()) setError(`${t("uploadFailed")}: ${errorText(cause)}`);
+      } finally {
+        if (current()) {
+          scope.pending--;
+          setUploading(scope.pending > 0);
+        }
+      }
+    });
+    await uploadQueue.current;
+  }
+
+  function removeAttachment(path: string) {
+    setAttachments((current) => {
+      const removed = current.find((file) => file.path === path);
+      if (removed?.previewUrl) {
+        URL.revokeObjectURL(removed.previewUrl);
+        attachmentPreviews.current.delete(removed.previewUrl);
+      }
+      return current.filter((file) => file.path !== path);
+    });
+  }
+
+  async function submit(event?: FormEvent, forceContinue = false) {
+    event?.preventDefault();
+    if (uploadScope.current?.pending) return;
+    if (composerContinue) {
+      if (loadingSession || connectionFailed || status === "closed" || !sessionId || sendingRef.current) return;
+      if (interrupted && supported.has("resume_pending")) {
+        await resumePending();
+        return;
+      }
+    }
+    const continuing = forceContinue || composerContinue;
+    const message = continuing ? t("continueTaskPrompt") : draft.trim();
+    if (
+      (!message && attachments.length === 0) ||
+      !sessionId ||
+      sendingRef.current
+    )
+      return;
+    if (message.startsWith("/") && attachments.length === 0) {
+      void runSlash(message);
+      return;
+    }
+    if (loadingSession || connectionFailed || !supported.has("prompt")) return;
+    const attachedText = attachments.length
+      ? `\n\n${t("attachedFiles")}:\n${attachments.map((file) => `- ${file.path}`).join("\n")}`
+      : "";
+    const submissionMessage = `${message}${attachedText}`.trim();
+    const targetSession = sessionId;
+    const navigation = navigationRevision.current;
+    const cursor = lastSeq.current;
+    const priorFailed = failedRun;
+    const priorInterrupted = interrupted;
+    const submission = ++sendingRevision.current;
+    const wasBusy = busy;
+    const editingQueueId = queueEditId;
+    const shouldQueue = wasBusy || Boolean(editingQueueId);
+    const clearAttachments = () => {
+      attachments.forEach((file) => {
+        if (file.previewUrl) {
+          URL.revokeObjectURL(file.previewUrl);
+          attachmentPreviews.current.delete(file.previewUrl);
+        }
+      });
+      // An acknowledgement must not clear files pasted after this submission,
+      // including attachments belonging to a newly selected session.
+      setAttachments(current => current.filter(file => !attachments.includes(file)));
+    };
+    sendingRef.current = true;
+    setSending(true);
+    updateDraft("");
+    setError("");
+    setInterrupted(false);
+    setFailedRun(false);
+    const key = `local-${++localMessageSeq.current}`;
+    if (!shouldQueue)
+      setRows((previous) => [
+        ...previous,
+        { kind: "text", id: key, role: "user", text: submissionMessage },
+      ]);
+    if (!shouldQueue) {
+      setStatus("running");
+      setRunActive(true);
+    }
+    try {
+      if (shouldQueue) {
+        if (!supported.has("queue_message")) throw new Error(t("runBusy"));
+        if (editingQueueId)
+          await api.cancelQueued(targetSession, editingQueueId);
+        const queued = await api.queueMessage(
+          targetSession,
+          submissionMessage,
+          queueKind,
+        );
+        if (navigation === navigationRevision.current) {
+          setQueueItems((previous) => [
+            ...previous.filter((item) => item.entryId !== editingQueueId),
+            {
+              entryId: queued.entryId,
+              queue: queued.queue || queueKind,
+              text: submissionMessage,
+              status: "queued",
+            },
+          ]);
+          setQueueEditId(null);
+          void refreshDiagnostics(targetSession);
+        }
+        clearAttachments();
+      } else {
+        await commandData(targetSession, "prompt", {
+          message: submissionMessage,
+        });
+        clearAttachments();
+      }
+    } catch (cause) {
+      if (!continuing && !draftBySession.current.get(targetSession))
+        updateDraft(message, targetSession);
+      if (navigation === navigationRevision.current) {
+        if (cursor === lastSeq.current && !wasBusy && !editingQueueId) {
+          setInterrupted(priorInterrupted);
+          setFailedRun(priorFailed);
+        }
+        if (!wasBusy && !editingQueueId && (!continuing || cursor === lastSeq.current)) {
+          setStatus((current) =>
+            current === "reconnecting" ? current : "ready",
+          );
+          setRunActive(false);
+        }
+        setRows((previous) => previous.filter((row) => row.id !== key));
+        setError(errorText(cause));
+      }
+    } finally {
+      if (submission === sendingRevision.current) {
+        sendingRef.current = false;
+        setSending(false);
+      }
+    }
+  }
+
+  async function resumePending() {
+    if (!sessionId || !supported.has("resume_pending") || busy || sendingRef.current ||
+      loadingSession || connectionFailed || status === "closed") return;
+    const submission = ++sendingRevision.current;
+    sendingRef.current = true;
+    setSending(true);
+    const navigation = navigationRevision.current;
+    const cursor = lastSeq.current;
+    const priorStatus = status;
+    const priorActive = runActive;
+    const priorInterrupted = interrupted;
+    const priorFailed = failedRun;
+    setInterrupted(false);
+    setFailedRun(false);
+    setError("");
+    setStatus("running");
+    setRunActive(true);
+    try {
+      const data = await commandData<{ resumed?: boolean }>(
+        sessionId,
+        "resume_pending",
+      );
+      if (navigation !== navigationRevision.current) return;
+      if (data.resumed === false) {
+        if (cursor === lastSeq.current) {
+          setStatus((current) =>
+            current === "reconnecting" ? current : priorStatus,
+          );
+          setRunActive(priorActive);
+          setFailedRun(priorFailed);
+        }
+        note("Nothing left to resume on this branch.");
+      }
+    } catch (cause) {
+      if (navigation !== navigationRevision.current) return;
+      if (cursor === lastSeq.current) {
+        setStatus((current) =>
+          current === "reconnecting" ? current : priorStatus,
+        );
+        setRunActive(priorActive);
+        setInterrupted(priorInterrupted);
+        setFailedRun(priorFailed);
+      }
+      setError(errorText(cause));
+    } finally {
+      if (submission === sendingRevision.current) {
+        sendingRef.current = false;
+        setSending(false);
+      }
+    }
+  }
+
+  async function continueCurrent(forcePrompt = false) {
+    if (interrupted && supported.has("resume_pending")) {
+      await resumePending();
+      return;
+    }
+    if ((failedRun || forcePrompt) && supported.has("prompt"))
+      await submit(undefined, forcePrompt);
+  }
+
+  function continueFromNotification(
+    notification: SessionCompletionNotification,
+  ) {
+    setSessionNotifications((previous) =>
+      previous.filter((item) => item.id !== notification.id),
+    );
+    if (notification.sessionId === activeSessionRef.current) {
+      if (loadingSession || !sessionHydrated || busy) {
+        pendingNotificationContinue.current = notification.sessionId;
+        return;
+      }
+      void continueCurrent(true);
+      return;
+    }
+    select(notification.sessionId);
+    pendingNotificationContinue.current = notification.sessionId;
+  }
+
+  useEffect(() => {
+    if (
+      !pendingNotificationContinue.current ||
+      pendingNotificationContinue.current !== sessionId ||
+      loadingSession ||
+      !sessionHydrated
+    )
+      return;
+    pendingNotificationContinue.current = null;
+    void continueCurrent(true);
+  }, [sessionHydrated, sessionId, loadingSession, interrupted, failedRun]);
+
+  /** Page backwards through the branch, prepending entries older than the
+   * current first row. The bridge forwards `get_messages` unchanged, so this is
+   * the same native projection the first snapshot used. */
+  const loadEarlier = useCallback(
+    async (automatic = false, source: "transcript" | "timeline" = "transcript") => {
+      const navigation = navigationRevision.current;
+      if (
+        !sessionId ||
+        !firstId ||
+        !hasMore ||
+        historical.active ||
+        loadingSession ||
+        mutationPending ||
+        earlierRequest.current?.navigation === navigation ||
+        !supported.has("get_messages")
+      )
+        return;
+      const request = { navigation, beforeId: firstId };
+      earlierRequest.current = request;
+      continueEarlier.current = null;
+      // A failed/no-progress cursor is retried only after leaving the top or by button.
+      autoEarlierCursor.current = `${navigation}:${sessionId}:${firstId}`;
+      setLoadingEarlier(true);
+      try {
+        const page = await api.messages(sessionId, {
+          beforeId: firstId,
+          limit: 48,
+        });
+        if (
+          navigation !== navigationRevision.current ||
+          earlierRequest.current !== request
+        )
+          return;
+        traceSnapshot(page, "older");
+        const older = rowsFromMessages(page.messages);
+        const nextId = page.firstId ?? "";
+        const more = Boolean(
+          page.hasMore && nextId && nextId !== request.beforeId,
+        );
+        // Capture at response time: the reader may have moved while the request ran.
+        rememberTranscriptPosition();
+        earlierPage.current = {
+          rows: prependRows(older, earlierPage.current?.rows ?? []),
+          firstId: nextId,
+          hasMore: more,
+        };
+        setRows((previous) => prependRows(older, previous));
+        setFirstId(nextId);
+        setHasMore(more);
+        if (source === "timeline") {
+          // An anchor restoration after a rail page must not start the
+          // transcript's automatic continuation on the newly advanced cursor.
+          autoEarlierCursor.current = `${navigation}:${sessionId}:${nextId}`;
+        }
+        if (automatic && more) continueEarlier.current = navigation;
+      } catch (cause) {
+        if (
+          navigation !== navigationRevision.current ||
+          earlierRequest.current !== request
+        )
+          return;
+        setError(errorText(cause));
+      } finally {
+        if (earlierRequest.current === request) {
+          earlierRequest.current = null;
+          setLoadingEarlier(false);
+        }
+      }
+    },
+    [
+      sessionId,
+      firstId,
+      hasMore,
+      historical.active,
+      loadingSession,
+      mutationPending,
+      supported,
+      rememberTranscriptPosition,
+      traceSnapshot,
+    ],
+  );
+
+  useEffect(() => {
+    if (loadingEarlier || continueEarlier.current === null) return;
+    const navigation = continueEarlier.current;
+    continueEarlier.current = null;
+    const node = transcriptRef.current;
+    // A page can advance the native cursor without adding visible rows. At the
+    // absolute top, another wheel gesture may not emit a scroll event at all.
+    if (
+      navigation === navigationRevision.current &&
+      node &&
+      node.scrollTop <= 160 &&
+      !followingRef.current &&
+      !connectionFailed
+    ) {
+      void loadEarlier(true);
+    }
+  }, [loadEarlier, loadingEarlier, rows, connectionFailed]);
+
+  async function refreshOAuth(provider: string) {
+    const navigation = navigationRevision.current;
+    try {
+      await api.refreshAuth(provider);
+      if (navigation !== navigationRevision.current) return;
+      setAuthMessage({ key: "oauthRefreshed", values: { provider } });
+      await refreshSessionDiagnostics();
+    } catch (cause) {
+      if (navigation !== navigationRevision.current) return;
+      setError(errorText(cause));
+    }
+  }
+
+  async function startOAuth(provider: string) {
+    if (!sessionId || !supported.has("oauth")) return;
+    const navigation = navigationRevision.current;
+    try {
+      let result = await api.oauth(sessionId, provider, "begin");
+      if (navigation !== navigationRevision.current) return;
+      if (result.status === "interaction") {
+        const display = result.display ?? {};
+        const url = typeof display.url === "string" ? display.url : "";
+        if (url) window.open(url, "rpi-oauth", "noopener,noreferrer");
+        const instructions =
+          typeof display.instructions === "string"
+            ? display.instructions
+            : Array.isArray(display.instructions)
+              ? display.instructions.join("\n")
+              : t("oauthInstructions");
+        const value = await requestText({
+          kind: "prompt",
+          title: t("oauthSignIn"),
+          message: `${instructions}${url ? `\n\n${url}` : ""}`,
+        });
+        if (!value?.trim()) return;
+        result = await api.oauth(sessionId, provider, "exchange", {
+          value: value.trim(),
+        });
+      }
+      if (navigation !== navigationRevision.current) return;
+      setAuthMessage({
+        key: result.status === "authenticated" ? "oauthSaved" : "oauthStatus",
+        values: { provider, status: result.status },
+      });
+      await refreshSessionDiagnostics();
+    } catch (cause) {
+      if (navigation !== navigationRevision.current) return;
+      setError(errorText(cause));
+    }
+  }
+
+  async function saveApiKey() {
+    if (!sessionId || !authProvider || !apiKeyDraft.trim()) return;
+    const navigation = navigationRevision.current;
+    const credential = credentialRevision.current;
+    try {
+      const result = await api.setApiKey(
+        sessionId,
+        authProvider,
+        apiKeyDraft.trim(),
+      );
+      if (
+        navigation !== navigationRevision.current ||
+        credential !== credentialRevision.current
+      )
+        return;
+      setApiKeyDraft("");
+      setAuthMessage({
+        key: "keySaved",
+        values: { provider: result.provider },
+      });
+      await refreshSessionDiagnostics();
+    } catch (cause) {
+      if (
+        navigation !== navigationRevision.current ||
+        credential !== credentialRevision.current
+      )
+        return;
+      setError(errorText(cause));
+    }
+  }
+
+  async function clearQueue() {
+    if (!sessionId || !supported.has("clear_queue")) return;
+    const navigation = navigationRevision.current;
+    try {
+      await api.clearQueue(sessionId);
+      if (navigation !== navigationRevision.current) return;
+      await refreshSessionDiagnostics();
+    } catch (cause) {
+      if (navigation !== navigationRevision.current) return;
+      setError(errorText(cause));
+    }
+  }
+
+  async function loadOlderHistory() {
+    const firstSeq = historyData?.firstSeq;
+    if (!sessionId || firstSeq == null || historyLoading || !historyHasMore)
+      return;
+    const navigation = navigationRevision.current;
+    setHistoryLoading(true);
+    try {
+      const page = await api.history(sessionId, {
+        beforeSeq: firstSeq,
+        limit: 100,
+      });
+      if (navigation !== navigationRevision.current) return;
+      setHistory((current) => {
+        if (!current) return page;
+        const existing = new Set(
+          current.records.map((record) => String(record.id)),
+        );
+        return {
+          ...page,
+          total: current.total,
+          records: page.records
+            .filter((record) => !existing.has(String(record.id)))
+            .concat(current.records),
+          hasMore: page.hasMore,
+        };
+      });
+      setHistoryHasMore(page.hasMore);
+    } catch (cause) {
+      if (navigation !== navigationRevision.current) return;
+      setError(errorText(cause));
+    } finally {
+      if (navigation === navigationRevision.current) setHistoryLoading(false);
+    }
+  }
+
+  async function sendQueuedNow(entryId: string) {
+    const targetSession = sessionId;
+    const item = pendingQueueItems.find((queued) => queued.entryId === entryId);
+    if (
+      !targetSession ||
+      busy ||
+      queueRunning ||
+      !item?.text?.trim() ||
+      !supported.has("prompt") ||
+      !supported.has("cancel_queued") ||
+      queueRunSubmission.current.has(targetSession)
+    )
+      return;
+    const navigation = navigationRevision.current;
+    const priorStatus = status;
+    const priorActive = runActive;
+    queueRunSubmission.current.add(targetSession);
+    setQueueRunning(true);
+    setStatus("starting");
+    setRunActive(true);
+    setInterrupted(false);
+    setError("");
+    try {
+      // The host owns queue delivery. Send only the selected item now and
+      // leave all other queue entries in their existing durable order.
+      await api.cancelQueued(targetSession, item.entryId);
+      if (navigation !== navigationRevision.current) return;
+      setQueueItems((current) =>
+        current.filter((queued) => queued.entryId !== item.entryId),
+      );
+      await commandData(targetSession, "prompt", { message: item.text.trim() });
+      if (navigation === navigationRevision.current) {
+        setQueueOpen(true);
+        await refreshDiagnostics(targetSession);
+      }
+    } catch (cause) {
+      if (navigation !== navigationRevision.current) return;
+      setStatus((current) =>
+        current === "reconnecting" ? current : priorStatus,
+      );
+      setRunActive(priorActive);
+      setError(errorText(cause));
+      await refreshDiagnostics(targetSession);
+    } finally {
+      queueRunSubmission.current.delete(targetSession);
+      if (navigation === navigationRevision.current) setQueueRunning(false);
+    }
+  }
+
+  async function queuePrompt() {
+    if (!sessionId || !queueDraft.trim() || !supported.has("queue_message"))
+      return;
+    if (queueSubmission.current.has(sessionId)) return;
+    const message = queueDraft.trim();
+    const draftRevision = queueDraftRevision.current;
+    const editingId = queueEditId;
+    queueSubmission.current.add(sessionId);
+    const navigation = navigationRevision.current;
+    try {
+      if (editingId) await api.cancelQueued(sessionId, editingId);
+      const queued = await api.queueMessage(sessionId, message, queueKind);
+      if (navigation !== navigationRevision.current) return;
+      setQueueItems((previous) => [
+        ...previous.filter((item) => item.entryId !== editingId),
+        {
+          entryId: queued.entryId,
+          queue: queued.queue || queueKind,
+          text: message,
+          status: "queued",
+        },
+      ]);
+      if (queueDraftRevision.current === draftRevision) setQueueDraft("");
+      setQueueEditId(null);
+      await refreshSessionDiagnostics();
+    } catch (cause) {
+      if (navigation !== navigationRevision.current) return;
+      setError(errorText(cause));
+    } finally {
+      queueSubmission.current.delete(sessionId);
+    }
+  }
+
+  useEffect(() => {
+    if (queueEditId) queueInputRef.current?.focus();
+  }, [queueEditId]);
+
+  function isEditableQueueItem(item: QueueItem) {
+    return (
+      !item.status || item.status === "queued" || item.status === "pending"
+    );
+  }
+
+  async function editQueued(item: QueueItem) {
+    if (!isEditableQueueItem(item) || !sessionId) return;
+    const navigation = navigationRevision.current;
+    const previous = queueItems;
+    const previousDraft = draft;
+    queueDraftRevision.current++;
+    setQueueEditId(null);
+    setQueueDraft("");
+    setQueueItems((items) => items.filter((queued) => queued.entryId !== item.entryId));
+    updateDraft(item.text);
+    setQueueKind(item.queue);
+    setQueueOpen(false);
+    setInspector(false);
+    requestAnimationFrame(() => composerInputRef.current?.focus());
+    try {
+      await api.cancelQueued(sessionId, item.entryId);
+      if (navigation === navigationRevision.current) await refreshSessionDiagnostics();
+    } catch (cause) {
+      if (navigation !== navigationRevision.current) return;
+      setQueueItems(previous);
+      setQueueOpen(true);
+      updateDraft(previousDraft);
+      setError(errorText(cause));
+    }
+  }
+
+  function cancelQueueEdit() {
+    queueDraftRevision.current++;
+    setQueueEditId(null);
+    setQueueDraft("");
+    updateDraft("");
+  }
+
+  async function cancelQueued(entryId: string) {
+    const navigation = navigationRevision.current;
+    const previous = queueItems;
+    if (queueEditId === entryId) cancelQueueEdit();
+    setQueueItems((items) => items.filter((item) => item.entryId !== entryId));
+    try {
+      await api.cancelQueued(sessionId, entryId);
+      if (navigation !== navigationRevision.current) return;
+      await refreshSessionDiagnostics();
+    } catch (cause) {
+      if (navigation !== navigationRevision.current) return;
+      setQueueItems(previous);
+      setError(errorText(cause));
+    }
+  }
+
+  async function forkSession(
+    source: Pick<SessionSummary, "sessionId" | "title">,
+    entryId?: string,
+  ) {
+    if (!source.sessionId || !actions.has("fork") || forkInFlight.current) return;
+    const sourceSessionId = source.sessionId;
+    const navigation = navigationRevision.current;
+    forkInFlight.current = true;
+    setForkPending(true);
+    try {
+      const title = await requestText({
+        kind: "prompt",
+        title: t("forkName"),
+        defaultValue: t("forkOf", {
+          title: source.title ?? sourceSessionId.slice(0, 8),
+        }),
+      });
+      if (title === null || navigation !== navigationRevision.current) return;
+      // A sent fork creates a durable session: never retry it automatically.
+      const created = await api.fork(sourceSessionId, entryId, title);
+      await refreshSessions();
+      if (navigation !== navigationRevision.current) return;
+      select(created.sessionId);
+    } catch (cause) {
+      if (navigation !== navigationRevision.current) return;
+      setError(errorText(cause));
+    } finally {
+      forkInFlight.current = false;
+      setForkPending(false);
+    }
+  }
+
+  async function forkCurrent(entryId?: string) {
+    if (!sessionId) return;
+    await forkSession(
+      { sessionId, title: current?.title ?? null },
+      entryId,
+    );
+  }
+
+  async function cloneCurrent() {
+    if (!sessionId || !actions.has("clone")) return;
+    const navigation = navigationRevision.current;
+    const title = await requestText({
+      kind: "prompt",
+      title: t("cloneName"),
+      defaultValue: t("cloneOf", {
+        title: current?.title ?? sessionId.slice(0, 8),
+      }),
+    });
+    if (title === null) return;
+    try {
+      const created = await api.clone(sessionId, title);
+      await refreshSessions();
+      if (navigation !== navigationRevision.current) return;
+      select(created.sessionId);
+    } catch (cause) {
+      if (navigation !== navigationRevision.current) return;
+      setError(errorText(cause));
+    }
+  }
+
+  async function rewindTo(entryId: string) {
+    if (!sessionId || !actions.has("history_mutation") || mutationPending)
+      return;
+    const confirmed = await requestText({
+      kind: "confirm",
+      title: t("rewind"),
+      message: t("confirmRewind"),
+    });
+    if (confirmed === null) return;
+    const navigation = navigationRevision.current;
+    setMutationPending(true);
+    try {
+      const result = await api.navigate(sessionId, entryId);
+      if (navigation !== navigationRevision.current) return;
+      if (result.outcome === "failed") {
+        const error = result.error;
+        throw new Error(
+          typeof error === "string"
+            ? error
+            : typeof error === "object" && error
+              ? String(
+                  (error as { message?: unknown }).message ??
+                    "navigation failed",
+                )
+              : "navigation failed",
+        );
+      }
+      setMutationPending(false);
+      navigationRevision.current++;
+      diagnosticsRevision.current++;
+      setConnectionRevision((value) => value + 1);
+    } catch (cause) {
+      if (navigation !== navigationRevision.current) return;
+      setError(errorText(cause));
+    } finally {
+      if (navigation === navigationRevision.current) setMutationPending(false);
+    }
+  }
+
+  async function answerDialog(answer: unknown, cancelled = false) {
+    if (!sessionId || !dialog || dialogBusy) return;
+    const navigation = navigationRevision.current;
+    const request = dialogRevision.current;
+    setDialogBusy(true);
+    try {
+      await commandData(sessionId, "ui_dialog_response", {
+        requestId: dialog.requestId,
+        ...(cancelled ? { cancelled: true } : { answer }),
+      });
+      if (navigation !== navigationRevision.current) return;
+      // ui_dialog_closed is authoritative; a later dialog can arrive before
+      // this command acknowledgement and must remain visible.
+    } catch (cause) {
+      if (
+        navigation !== navigationRevision.current ||
+        request !== dialogRevision.current
+      )
+        return;
+      setError(errorText(cause));
+    } finally {
+      if (
+        navigation === navigationRevision.current &&
+        request === dialogRevision.current
+      )
+        setDialogBusy(false);
+    }
+  }
+
+  async function abort() {
+    if (!sessionId || !supported.has("abort")) return;
+    const navigation = navigationRevision.current;
+    try {
+      await commandData(sessionId, "abort");
+    } catch (cause) {
+      if (navigation !== navigationRevision.current) return;
+      setError(errorText(cause));
+    }
+  }
+
+  async function submitLogin(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!passwordDraft.trim() || authBusy) return;
+    setAuthBusy(true);
+    setAuthError("");
+    try {
+      const result = await api.login(passwordDraft);
+      setPasswordDraft("");
+      setAuthenticated(result.authenticated);
+    } catch (cause) {
+      setAuthError(errorText(cause));
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function logout() {
+    try {
+      await api.logout();
+      clearAccess();
+    } catch (cause) {
+      setError(errorText(cause));
+    }
+  }
+
+  function select(id: string, selectedProjectId?: string) {
+    pendingNotificationContinue.current = null;
+    // refreshSessions publishes this ref before React renders: URL initialization
+    // and post-mutation fallbacks must guard against that latest list too.
+    const known = (sessionListValue.current ?? sessions).find((entry) => entry.sessionId === id);
+    const blocked = sessionSelectionError(known);
+    if (blocked) {
+      setError(errorText(blocked));
+      if (window.innerWidth < 768) setSidebar(false);
+      return;
+    }
+    const nextProject = selectedProjectId ?? known?.projectId;
+    if (activeSessionRef.current === id && (!nextProject || projectRef.current === nextProject)) {
+      setPanel(false);
+      if (window.innerWidth < 768) setSidebar(false);
+      return;
+    }
+    if (
+      activeSessionRef.current !== id ||
+      (nextProject && projectRef.current !== nextProject)
+    ) {
+      navigationRevision.current++;
+      diagnosticsRevision.current++;
+      sessionReadsAbort.current?.abort();
+      diagnosticsAbort.current?.abort();
+    }
+    activeSessionRef.current = id;
+    if (nextProject) {
+      projectRef.current = nextProject;
+      setProjectId(nextProject);
+    }
+    setLoadingSession(Boolean(id));
+    rowsSessionRef.current = id;
+    setRows(id ? (rowsBySession.current.get(id) ?? []) : []);
+    followingRef.current = true;
+    setFollowing(true);
+    setSessionId(id);
+    setPanel(false);
+    if (window.innerWidth < 768) setSidebar(false);
+    const url = new URL(location.href);
+    if (id) url.searchParams.set("session", id);
+    else url.searchParams.delete("session");
+    history.replaceState(null, "", url);
+  }
+
+  function selectProject(selected: Project) {
+    if (projectRef.current === selected.id && activeSessionRef.current) return;
+    if (activeSessionRef.current || projectRef.current !== selected.id) {
+      navigationRevision.current++;
+      diagnosticsRevision.current++;
+    }
+    projectRef.current = selected.id;
+    setProjectId(selected.id);
+    activeSessionRef.current = "";
+    setSessionId("");
+    const url = new URL(location.href);
+    url.searchParams.delete("session");
+    history.replaceState(null, "", url);
+  }
+
+  function selectSidebarSession(session: SessionSummary) {
+    select(session.sessionId, session.projectId);
+  }
+
+  function retirementBusy(session: SessionSummary) {
+    const state = session.sessionId === activeSessionRef.current ? status : session.status;
+    if (!["running", "starting", "awaiting_input"].includes(state)) return false;
+    setError(errorText(new ApiError("", 409, "session_busy")));
+    if (window.innerWidth < 768) setSidebar(false);
+    return true;
+  }
+
+  async function updateSessionMetadata(
+    session: SessionSummary,
+    patch: { pinned?: boolean; archived?: boolean; tags?: string[] },
+  ) {
+    if (patch.archived && retirementBusy(session)) return;
+    const id = session.sessionId;
+    const navigation = navigationRevision.current;
+    const revision = (metadataRevisions.current.get(id) ?? 0) + 1;
+    metadataRevisions.current.set(id, revision);
+    const task = (metadataQueues.current.get(id) ?? Promise.resolve()).then(
+      async () => {
+        try {
+          await api.sessionMetadata(session.sessionId, patch);
+          if (metadataRevisions.current.get(id) !== revision) return;
+          const list = await refreshSessions();
+          if (!list || metadataRevisions.current.get(id) !== revision) return;
+          if (
+            navigation === navigationRevision.current &&
+            patch.archived &&
+            list.find((entry) => entry.sessionId === session.sessionId)
+              ?.archived &&
+            session.sessionId === activeSessionRef.current
+          ) {
+            const next = list.find(
+              (entry) =>
+                entry.projectId === session.projectId && !entry.archived && !entry.deleting,
+            );
+            select(next?.sessionId ?? "", next?.projectId ?? session.projectId);
+          }
+        } catch (cause) {
+          if (
+            metadataRevisions.current.get(id) === revision &&
+            navigation === navigationRevision.current
+          )
+            setError(retirementError(cause));
+          if (navigation === navigationRevision.current && window.innerWidth < 768) setSidebar(false);
+        }
+      },
+    );
+    metadataQueues.current.set(id, task);
+    await task;
+    if (metadataQueues.current.get(id) === task) {
+      metadataQueues.current.delete(id);
+      metadataRevisions.current.delete(id);
+    }
+  }
+
+  async function permanentlyDeleteSession(session: SessionSummary) {
+    if (deleteInFlight.current || retirementBusy(session)) return;
+    const id = session.sessionId;
+    const navigation = navigationRevision.current;
+    const wasActive = activeSessionRef.current === id;
+    deleteInFlight.current = true;
+    setDeletePending(true);
+    try {
+      // A sent DELETE may already have landed even if the response fails. Never auto-retry.
+      await api.deleteSession(id);
+      draftBySession.current.delete(id);
+      saveDrafts(draftBySession.current);
+      rowsBySession.current.delete(id);
+      setSessions((previous) => previous.filter((entry) => entry.sessionId !== id));
+      const list = await refreshSessions();
+      if (!wasActive || navigation !== navigationRevision.current || activeSessionRef.current !== id) return;
+      const next = list?.find(
+        (entry) => entry.sessionId !== id && entry.projectId === session.projectId && !entry.archived && !entry.deleting,
+      );
+      select(next?.sessionId ?? "", next?.projectId ?? session.projectId);
+    } catch (cause) {
+      if (navigation !== navigationRevision.current) return;
+      setError(retirementError(cause, true));
+      if (window.innerWidth < 768) setSidebar(false);
+    } finally {
+      deleteInFlight.current = false;
+      setDeletePending(false);
+      setDeleteTarget(null);
+    }
+  }
+
+  async function updateProjectMetadata(project: Project, archived: boolean) {
+    try {
+      const result = await api.projectMetadata(project.id, { archived });
+      setProjects((previous) =>
+        previous.map((item) =>
+          item.id === result.project.id ? result.project : item,
+        ),
+      );
+      if (archived && projectRef.current === project.id) {
+        const next = projects.find(
+          (item) => item.id !== project.id && !item.archived,
+        );
+        if (next) selectProject(next);
+        else {
+          projectRef.current = "";
+          setProjectId("");
+          activeSessionRef.current = "";
+          setSessionId("");
+          const url = new URL(location.href);
+          url.searchParams.delete("session");
+          history.replaceState(null, "", url);
+        }
+      }
+    } catch (cause) {
+      setError(errorText(cause));
+    }
+  }
+
+  if (!authChecked || (authRequired && !authenticated)) {
+    return (
+      <LoginScreen
+        checking={!authChecked}
+        accessError={accessCheckFailed}
+        onRetry={() => setAuthRevision((value) => value + 1)}
+        language={language}
+        theme={theme}
+        onLanguage={setLanguage}
+        onTheme={setThemePreference}
+        password={passwordDraft}
+        onPassword={(value) => {
+          setPasswordDraft(value);
+          setAuthError("");
+        }}
+        busy={authBusy}
+        error={authError}
+        onSubmit={submitLogin}
+      />
+    );
+  }
+
+  return (
+    <div
+      className={`workspace${immersive ? " workspace--immersive" : ""}`}
+      style={
+        {
+          "--sidebar-width": `${sidebarWidth}px`,
+          "--workbench-width": `${workbenchWidth}px`,
+        } as CSSProperties
+      }
+    >
+      {sessionNotifications.length > 0 &&
+        createPortal(
+          <div
+            className="session-notification-stack"
+            aria-label={t("sessionNotifications")}
+            aria-live="polite"
+          >
+            {sessionNotifications.map((notification) => {
+              const failed = isFailedOutcome(notification.outcome);
+              const statusLabel = failed
+                ? t("sessionFailed")
+                : t("sessionCompleted");
+              return (
+                <div
+                  className={`session-notification ${failed ? "session-notification--error" : "session-notification--success"}`}
+                  key={notification.id}
+                >
+                  <button
+                    type="button"
+                    className="session-notification-main"
+                    aria-label={`${statusLabel}: ${notification.title || t("newSession")}`}
+                    onClick={() => {
+                      select(notification.sessionId);
+                      setSessionNotifications((previous) =>
+                        previous.filter((item) => item.id !== notification.id),
+                      );
+                    }}
+                  >
+                    {failed ? (
+                      <AlertTriangle size={16} aria-hidden="true" />
+                    ) : (
+                      <Check size={16} aria-hidden="true" />
+                    )}
+                    <span className="session-notification-copy">
+                      <strong>{notification.title || t("newSession")}</strong>
+                      <span>{statusLabel}</span>
+                      <span>
+                        {t("sessionCompletedOutcome", {
+                          outcome: valueLabel(
+                            language,
+                            notification.outcome,
+                          ),
+                        })}
+                      </span>
+                      {notification.error && <span>{notification.error}</span>}
+                    </span>
+                  </button>
+                  {failed &&
+                    (supported.has("prompt") ||
+                      supported.has("resume_pending")) && (
+                      <button
+                        type="button"
+                        className="session-notification-continue"
+                        aria-label={t("continue")}
+                        title={t("continue")}
+                        onClick={() => continueFromNotification(notification)}
+                      >
+                        <Play size={14} aria-hidden="true" />
+                        <span>{t("continue")}</span>
+                      </button>
+                    )}
+                  <button
+                    type="button"
+                    className="icon-button session-notification-close"
+                    aria-label={t("closeNotification")}
+                    title={t("closeNotification")}
+                    onClick={() =>
+                      setSessionNotifications((previous) =>
+                        previous.filter((item) => item.id !== notification.id),
+                      )
+                    }
+                  >
+                    <X size={15} aria-hidden="true" />
+                  </button>
+                </div>
+              );
+            })}
+          </div>,
+          document.body,
+        )}
+      {dialog && (
+        <DialogOverlay
+          key={dialog.requestId}
+          dialog={dialog}
+          answer={dialogAnswer}
+          busy={dialogBusy}
+          language={language}
+          onAnswer={setDialogAnswer}
+          onSubmit={(value) => void answerDialog(value)}
+          onCancel={() => void answerDialog(null, true)}
+        />
+      )}
+      {textRequest?.kind === "prompt" && (
+        <PromptDialog
+          language={language}
+          title={textRequest.title}
+          message={textRequest.message}
+          defaultValue={textRequest.defaultValue}
+          onClose={() => resolveTextRequest(null)}
+          onSubmit={(value) => resolveTextRequest(value)}
+        />
+      )}
+      {textRequest?.kind === "confirm" && (
+        <ConfirmDialog
+          language={language}
+          title={textRequest.title}
+          message={textRequest.message}
+          onClose={() => resolveTextRequest(null)}
+          onConfirm={() => resolveTextRequest("confirmed")}
+        />
+      )}
+      {deleteTarget && (
+        <ConfirmDialog
+          language={language}
+          title={language === "zh" ? "永久删除会话" : "Delete session permanently"}
+          message={
+            language === "zh"
+              ? `确定要永久删除“${deleteTarget.title || "新会话"}”吗？此操作将删除会话历史记录并释放 RPC 连接，不会删除项目文件，且无法撤销。运行中的会话请先停止并等待结束。`
+              : `Permanently delete “${deleteTarget.title || "New session"}”? This deletes session history and releases the RPC connection, but does not delete project files. This cannot be undone. Stop running sessions and wait for them to settle first.`
+          }
+          confirmLabel={language === "zh" ? "永久删除" : "Delete permanently"}
+          busy={deletePending}
+          onClose={() => setDeleteTarget(null)}
+          onConfirm={() => {
+            void permanentlyDeleteSession(deleteTarget);
+          }}
+        />
+      )}
+      {projectDialog && (
+        <ProjectDialog
+          language={language}
+          root={projectsRoot}
+          onClose={() => setProjectDialog(false)}
+          onCreated={async (selected) => {
+            const navigation = navigationRevision.current;
+            const result = await api.projects();
+            if (navigation !== navigationRevision.current) return;
+            setProjects(result.projects);
+            setProjectsRoot(result.projectsRoot ?? "");
+            await createSession(selected.id);
+          }}
+        />
+      )}
+      {projectRenameTarget && (
+        <ProjectRenameDialog
+          language={language}
+          project={projectRenameTarget}
+          onClose={() => setProjectRenameTarget(null)}
+          onSave={async (name) => {
+            const result = await api.renameProject(
+              projectRenameTarget.id,
+              name,
+            );
+            setProjects((previous) =>
+              previous.map((project) =>
+                project.id === result.project.id ? result.project : project,
+              ),
+            );
+          }}
+        />
+      )}
+      {renameTarget && (
+        <RenameDialog
+          language={language}
+          session={renameTarget}
+          onClose={() => setRenameTarget(null)}
+          onSave={async (name) => {
+            await api.rename(renameTarget.sessionId, name);
+            await refreshSessions();
+          }}
+        />
+      )}
+      {tagsTarget && (
+        <TagsDialog
+          language={language}
+          session={tagsTarget}
+          onClose={() => setTagsTarget(null)}
+          onSave={async (tags) => {
+            await api.sessionMetadata(tagsTarget.sessionId, { tags });
+            await refreshSessions();
+          }}
+        />
+      )}
+      {settingsOpen && (
+        <Modal
+          language={language}
+          title={language === "zh" ? "设置" : "Settings"}
+          onClose={() => setSettingsOpen(false)}
+        >
+          <div className="project-form workspace-preferences">
+            <label>{language === "zh" ? "外观" : "Appearance"}</label>
+            <div className="project-mode" role="group" aria-label={language === "zh" ? "外观" : "Appearance"}>
+              <button
+                aria-pressed={themePreference === "system"}
+                onClick={() => setThemePreference("system")}
+              >
+                {language === "zh" ? "随系统" : "System"}
+              </button>
+              <button
+                aria-pressed={themePreference === "light"}
+                onClick={() => setThemePreference("light")}
+              >
+                <Sun size={16} />
+                {language === "zh" ? "浅色" : "Light"}
+              </button>
+              <button
+                aria-pressed={themePreference === "dark"}
+                onClick={() => setThemePreference("dark")}
+              >
+                <Moon size={16} />
+                {language === "zh" ? "深色" : "Dark"}
+              </button>
+            </div>
+            <label htmlFor="settings-language">{t("language")}</label>
+            <MenuSelect
+              label={t("language")}
+              value={language}
+              onChange={(value) => setLanguage(value as Language)}
+              options={[
+                { value: "zh", label: "简体中文" },
+                { value: "en", label: "English" },
+              ]}
+            />
+            <label>{t("toolNames")}</label>
+            <div className="project-mode" role="group" aria-label={t("toolNames")}>
+              <button
+                type="button"
+                aria-pressed={toolNameMode === "native"}
+                onClick={() => setToolNameMode("native")}
+              >
+                {t("nativeToolNames")}
+              </button>
+              <button
+                type="button"
+                aria-pressed={toolNameMode === "mapped"}
+                onClick={() => setToolNameMode("mapped")}
+              >
+                {t("mappedToolNames")}
+              </button>
+            </div>
+            <div className="shortcut-list">
+              <span>{t("newSession")}</span>
+              <kbd>Ctrl / ⌘ N</kbd>
+              <span>{language === "zh" ? "搜索会话" : "Search chats"}</span>
+              <kbd>Ctrl / ⌘ K</kbd>
+              <span>{t("closeSidebar")}</span>
+              <kbd>Ctrl / ⌘ B</kbd>
+            </div>
+          </div>
+        </Modal>
+      )}
+      {sidebar && !immersive && (
+        <>
+          <button
+            className="sidebar-backdrop mobile-only"
+            aria-label={t("dismissSidebar")}
+            onClick={() => setSidebar(false)}
+          />
+          <aside className="sidebar open">
+            <div className="sidebar-brand">
+              <Mark /> <span>rpi</span>{" "}
+              <span className="brand-caption">{t("workspace")}</span>
+              <button
+                className="icon-button mobile-only"
+                aria-label={t("closeSidebar")}
+                onClick={() => setSidebar(false)}
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <ProjectSidebar
+              projects={projects}
+              sessions={sidebarSessions}
+              draftSessionIds={draftSessionIds}
+              activeProjectId={projectId}
+              sessionId={sessionId}
+              language={language}
+              creating={creatingSession}
+              canManage={actions.has("session_organization")}
+              canFork={actions.has("fork")}
+              canCreate={actions.has("create_project")}
+              onSelectProject={selectProject}
+              onSelectSession={selectSidebarSession}
+              onNewSession={(id) => void createSession(id)}
+              onNewProject={() => setProjectDialog(true)}
+              onRename={setRenameTarget}
+              onFork={(session) => void forkSession(session)}
+              onRenameProject={setProjectRenameTarget}
+              onProjectMetadata={updateProjectMetadata}
+              onEditTags={setTagsTarget}
+              onDelete={(session) => {
+                if (!deleteInFlight.current && !retirementBusy(session)) setDeleteTarget(session);
+              }}
+              onMetadata={updateSessionMetadata}
+            />
+            <div className="sidebar-bottom">
+              <div className="utility-nav">
+                <button onClick={() => setSettingsOpen(true)}>
+                  <Settings2 size={14} />
+                  {language === "zh" ? "设置" : "Settings"}
+                  <kbd>Ctrl ,</kbd>
+                </button>
+                <button
+                  disabled={!sessionId}
+                  className={panel ? "active" : ""}
+                  onClick={() => {
+                    setTraceOpen(false);
+                    setPanel(true);
+                    setInspector(false);
+                    if (window.matchMedia("(max-width: 767px)").matches) setSidebar(false);
+                  }}
+                >
+                  <Settings2 size={14} /> {t("runtimeSettings")}
+                </button>
+              </div>
+              <div className="account-panel">
+                <span className="user-avatar">U</span>
+                <span className="account-name">{t("workspaceUser")}</span>
+                <button
+                  className="icon-button"
+                  aria-label={
+                    language === "zh" ? "切换外观" : "Toggle appearance"
+                  }
+                  onClick={() => setThemePreference(theme === "light" ? "dark" : "light")}
+                  title={t(
+                    theme === "light" ? "switchToDark" : "switchToLight",
+                  )}
+                >
+                  {theme === "light" ? <Moon size={14} /> : <Sun size={14} />}
+                </button>
+                {authRequired && (
+                  <button
+                    type="button"
+                    className="icon-button account-button"
+                    onClick={() => void logout()}
+                    title={t("signOut")}
+                    aria-label={t("signOut")}
+                  >
+                    <LogOut size={15} />
+                  </button>
+                )}
+              </div>
+              <div className="local-label">
+                <span
+                  className="workspace-security"
+                  title={t("loopback")}
+                  aria-label={t("loopback")}
+                >
+                  <ShieldCheck size={14} />
+                </span>
+                <MenuSelect
+                  className="language-select"
+                  label={t("language")}
+                  value={language}
+                  onChange={(value) => setLanguage(value as Language)}
+                  options={[
+                    { value: "en", label: t("english") },
+                    { value: "zh", label: t("chinese") },
+                  ]}
+                />
+                <button
+                  className="icon-button"
+                  aria-label={t("refreshSessions")}
+                  title={t("refreshSessions")}
+                  onClick={() => void refreshSessions()}
+                >
+                  <RefreshCw size={13} />
+                </button>
+              </div>
+            </div>
+          </aside>
+          <Splitter
+            label={t("resizeSidebar")}
+            value={sidebarWidth}
+            min={200}
+            max={360}
+            onChange={setSidebarWidth}
+          />
+        </>
+      )}
+
+      <section className="main-shell">
+        {immersive && (
+          <button
+            type="button"
+            className="icon-button immersive-exit"
+            aria-label={t("exitImmersiveView")}
+            title={t("exitImmersiveView")}
+            onClick={() => setImmersive(false)}
+          >
+            <Minimize2 size={17} aria-hidden="true" />
+          </button>
+        )}
+        <header className="toolbar">
+          <div className="toolbar-left">
+            <button
+              className="icon-button"
+              aria-label={t("toggleSidebar")}
+              onClick={() => setSidebar(!sidebar)}
+            >
+              <PanelLeft size={17} />
+            </button>
+            <div
+              className="breadcrumb"
+              aria-label={`${project?.name ?? "rpi"} · ${current?.title ?? t("newSession")}`}
+            >
+              <span
+                className="breadcrumb-project"
+                title={project?.name ?? "rpi"}
+              >
+                {project?.name ?? "rpi"}
+              </span>
+              <span className="breadcrumb-separator" aria-hidden="true">
+                ·
+              </span>
+              <h1 title={current?.title ?? t("newSession")}>
+                {current?.title ?? t("newSession")}
+              </h1>
+            </div>
+            <button
+              type="button"
+              className="mobile-session-switcher"
+              aria-label={t("switchSession")}
+              aria-expanded={mobileSessionPicker}
+              onClick={() => {
+                setMobileSessionQuery("");
+                setMobileSessionPicker(true);
+              }}
+            >
+              <span>
+                <small>{project?.name ?? "rpi"}</small>
+                <strong>{current?.title ?? t("newSession")}</strong>
+                {activeSessionRunning && (
+                  <small className={`mobile-session-status${activeSession?.status === "awaiting_input" ? " awaiting-input" : ""}`}>
+                    <span className="status-dot" /> {t(activeSession?.status === "awaiting_input" ? "sessionAwaitingAnswer" : "running")}
+                  </small>
+                )}
+              </span>
+              <ChevronDown size={15} aria-hidden="true" />
+            </button>
+          </div>
+          <div className="toolbar-actions">
+            <button
+              type="button"
+              className={`icon-button ${immersive ? "selected" : ""}`}
+              disabled={!sessionId}
+              aria-label={t("immersiveView")}
+              title={t("immersiveView")}
+              aria-pressed={immersive}
+              onClick={() => {
+                setImmersive(true);
+                setSidebar(false);
+                setTimelineOpen(false);
+                setPanel(false);
+                setInspector(false);
+                setTraceOpen(false);
+                setWorkbenchOpen(false);
+              }}
+            >
+              <Maximize2 size={17} aria-hidden="true" />
+            </button>
+            {!activeSessionRunning && (
+              <span
+                className={`connection ${status === "error" ? "offline" : ""}`}
+                title={connectionLabel}
+              >
+                <span className="status-dot" /> {connectionLabel}
+              </span>
+            )}
+            {actions.has("clone") && (
+              <button
+                disabled={!sessionId}
+                className="icon-button toolbar-clone"
+                title={t("cloneSession")}
+                aria-label={t("cloneSession")}
+                onClick={() => void cloneCurrent()}
+              >
+                <Copy size={16} />
+              </button>
+            )}
+            <button
+              type="button"
+              className={`icon-button ${messageSearchOpen ? "selected" : ""}`}
+              disabled={!sessionId}
+              aria-label={t("messageSearch")}
+              title={t("messageSearch")}
+              aria-pressed={messageSearchOpen}
+              onClick={() => setMessageSearchOpen((open) => !open)}
+            >
+              <Search size={17} aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              className={`icon-button ${timelineOpen ? "selected" : ""}`}
+              disabled={!sessionId}
+              aria-label={t("conversationTimeline")}
+              aria-expanded={timelineOpen}
+              aria-controls="conversation-timeline-navigation"
+              title={t(timelineOpen ? "timelineCollapse" : "timelineExpand")}
+              onClick={() => setTimelineOpen((open) => !open)}
+            >
+              <ListOrdered size={17} aria-hidden="true" />
+            </button>
+            <button
+              ref={traceButtonRef}
+              className={`icon-button ${traceOpen ? "selected" : ""}`}
+              disabled={!sessionId}
+              aria-label={t("executionTrace")}
+              title={t("executionTrace")}
+              aria-pressed={traceOpen}
+              onClick={() => {
+                setTraceOpen(!traceOpen);
+                setPanel(false);
+                setInspector(false);
+                setWorkbenchOpen(false);
+              }}
+            >
+              <Activity size={17} aria-hidden="true" />
+            </button>
+            <button
+              className="icon-button"
+              aria-label={t("toggleInspector")}
+              title={t("toggleInspector")}
+              onClick={() => {
+                setTraceOpen(false);
+                setInspector(!inspector);
+                setPanel(false);
+              }}
+            >
+              <Settings2 size={17} />
+            </button>
+            {project && actions.has("files") && (
+              <button
+                className={`icon-button ${workbenchOpen && !panel && !inspector ? "selected" : ""}`}
+                aria-label={t("toggleFiles")}
+                aria-pressed={workbenchOpen && !panel && !inspector}
+                onClick={() => {
+                  setTraceOpen(false);
+                  setWorkbenchOpen(!workbenchOpen || panel || inspector);
+                  setPanel(false);
+                  setInspector(false);
+                }}
+              >
+                <Files size={17} />
+              </button>
+            )}
+          </div>
+        </header>
+
+        <MessageSearch
+          open={messageSearchOpen}
+          query={messageSearchQuery}
+          results={messageSearchResults}
+          activeIndex={messageSearchIndex}
+          loading={messageSearchLoading}
+          historySupported={nativeMessageQueries}
+          language={language}
+          onQuery={(value) => {
+            setMessageSearchQuery(value);
+            setMessageSearchIndex(0);
+          }}
+          onClose={() => setMessageSearchOpen(false)}
+          onSelect={selectMessageSearch}
+        />
+
+        {mobileSessionPicker && (
+          <div
+            className="mobile-session-backdrop"
+            role="presentation"
+            onClick={() => setMobileSessionPicker(false)}
+          >
+            <section
+              className="mobile-session-sheet"
+              role="dialog"
+              aria-modal="true"
+              aria-label={t("switchSession")}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="mobile-session-sheet-heading">
+                <h2>{t("switchSession")}</h2>
+                <button
+                  type="button"
+                  className="icon-button"
+                  aria-label={t("closePanel")}
+                  onClick={() => setMobileSessionPicker(false)}
+                >
+                  <X size={16} />
+                </button>
+              </div>
+              <input
+                className="mobile-session-search"
+                value={mobileSessionQuery}
+                onChange={(event) => setMobileSessionQuery(event.target.value)}
+                placeholder={t("search")}
+                aria-label={t("search")}
+              />
+              <div className="mobile-session-list">
+                {mobileSessionResults.length > 0 ? (
+                  mobileSessionResults.map((entry) => {
+                    const entryProject = projects.find(
+                      (item) => item.id === entry.projectId,
+                    );
+                    const selected = entry.sessionId === sessionId;
+                    const entryAwaitingAnswer = entry.status === "awaiting_input";
+                    const entryRunning = ["running", "starting"].includes(entry.status ?? "");
+                    return (
+                      <button
+                        type="button"
+                        className={`mobile-session-option${selected ? " selected" : ""}`}
+                        key={entry.sessionId}
+                        onClick={() => {
+                          select(entry.sessionId, entry.projectId);
+                          setMobileSessionPicker(false);
+                        }}
+                      >
+                        <span
+                          className={`mobile-session-option-status${entryAwaitingAnswer ? " awaiting-input" : entryRunning ? " running" : ""}`}
+                        />
+                        <span className="mobile-session-option-copy">
+                          <strong>{entry.title || t("newSession")}</strong>
+                          <small>
+                            {entryProject?.name ?? "rpi"}
+                            {entryRunning && ` · ${t("running")}`}
+                          </small>
+                        </span>
+                        <SessionAnswerBadge session={entry} language={language} />
+                        <SessionIssueBadge session={entry} language={language} />
+                        {selected && <Check size={15} />}
+                      </button>
+                    );
+                  })
+                ) : (
+                  <p className="mobile-session-empty">
+                    {t("noMatchingSessions")}
+                  </p>
+                )}
+              </div>
+            </section>
+          </div>
+        )}
+
+        {interrupted && !recoveryNoticeDismissed && (
+          <div className="notice-banner">
+            <AlertTriangle size={14} />
+            <span>{t("interruptedRun")}</span>
+            <button
+              className="icon-button"
+              aria-label={t("dismiss")}
+              onClick={() => setRecoveryNoticeDismissed(true)}
+            >
+              <X size={14} />
+            </button>
+          </div>
+        )}
+
+        {error && (
+          <div className="error-banner">
+            <X size={14} />
+            <span>{error}</span>
+            {connectionFailed && (
+              <button
+                className="banner-action"
+                onClick={() => setConnectionRevision((value) => value + 1)}
+              >
+                {language === "zh" ? "重试连接" : "Retry connection"}
+              </button>
+            )}
+            <button
+              className="icon-button"
+              aria-label={t("dismiss")}
+              onClick={() => setError("")}
+            >
+              <X size={14} />
+            </button>
+          </div>
+        )}
+
+        <main className="main-content chat-layout">
+          <div
+            className={`conversation-column ${!historical.active && rows.length === 0 && !loadingSession && !creatingSession ? "empty-conversation" : ""}`}
+          >
+            <div className="transcript-frame">
+            <div
+              className="transcript"
+              ref={transcriptRef}
+              data-history-window={historical.active ? "true" : undefined}
+              aria-busy={historical.active && historical.loading}
+              onClickCapture={(event) => {
+                if (
+                  !(event.target instanceof Element) ||
+                  !event.target.closest(
+                    ".tool-card > summary, .message-attachment > summary",
+                  )
+                )
+                  return;
+                // Opening details is a reading action, not a request to follow
+                // output growth to the bottom. Capture before the native toggle.
+                followingRef.current = false;
+                setFollowing(false);
+                rememberTranscriptPosition();
+              }}
+              onScroll={(event) => {
+                const node = event.currentTarget;
+                if (historical.active) {
+                  followingRef.current = false;
+                  setFollowing(false);
+                  rememberTranscriptPosition();
+                  return;
+                }
+                const nearBottom =
+                  node.scrollHeight - node.scrollTop - node.clientHeight < 80;
+                followingRef.current = nearBottom;
+                setFollowing(nearBottom);
+                rememberTranscriptPosition();
+                if (node.scrollTop > 160) {
+                  autoEarlierCursor.current = null;
+                } else if (!nearBottom && !loadingSession && !connectionFailed) {
+                  const cursor = `${navigationRevision.current}:${sessionId}:${firstId}`;
+                  if (autoEarlierCursor.current !== cursor)
+                    void loadEarlier(true);
+                }
+              }}
+            >
+              <div className="message-list">
+                {historical.active && (
+                  <div className="history-window-status">
+                    <nav aria-label={t("historyContextPagination")}>
+                      <button
+                        type="button"
+                        onClick={historical.earlier}
+                        disabled={historical.loading || !historical.page?.hasMoreBefore || !historical.page.nextBeforeId}
+                      >
+                        {t("historyContextEarlier")}
+                      </button>
+                      <span>{t("historyContextTitle")}</span>
+                      <button
+                        type="button"
+                        onClick={historical.later}
+                        disabled={historical.loading || !historical.page?.hasMoreAfter || !historical.page.nextAfterId}
+                      >
+                        {t("historyContextLater")}
+                      </button>
+                    </nav>
+                    {historical.loading && <p role="status">{t("loadingEarlierMessages")}</p>}
+                    {historical.error && (
+                      <p role="alert">
+                        {historical.error}{" "}
+                        <button type="button" onClick={historical.retry}>{t("historyContextRetry")}</button>
+                      </p>
+                    )}
+                    {historical.page && !historical.rows.length && <p>{t("historyContextEmpty")}</p>}
+                  </div>
+                )}
+                {!historical.active && hasMore && (
+                  <div className="load-earlier" aria-busy={loadingEarlier}>
+                    <button
+                      type="button"
+                      title={t("scrollForEarlier")}
+                      onClick={() => void loadEarlier()}
+                      disabled={loadingEarlier}
+                    >
+                      <Loader2
+                        size={13}
+                        className={loadingEarlier ? "spin" : undefined}
+                      />
+                      {t("loadEarlier")}
+                    </button>
+                    {loadingEarlier && (
+                      <span className="sr-only" role="status">
+                        {t("loadingEarlierMessages")}
+                      </span>
+                    )}
+                  </div>
+                )}
+
+                {loadingSession && rows.length === 0 && (
+                  <div
+                    className="session-loading"
+                    role="status"
+                    aria-label={t("loadingConversation")}
+                  >
+                    <span className="sr-only">{t("loadingConversation")}</span>
+                    <div className="session-skeleton" aria-hidden="true">
+                      <div className="skeleton-message skeleton-assistant">
+                        <div className="skeleton-heading">
+                          <span className="skeleton-avatar" />
+                          <span className="skeleton-line skeleton-name" />
+                        </div>
+                        <div className="skeleton-body">
+                          <span className="skeleton-line skeleton-wide" />
+                          <span className="skeleton-line skeleton-medium" />
+                          <span className="skeleton-line skeleton-short" />
+                        </div>
+                      </div>
+                      <div className="skeleton-message skeleton-user">
+                        <div className="skeleton-heading">
+                          <span className="skeleton-line skeleton-user-name" />
+                          <span className="skeleton-avatar" />
+                        </div>
+                        <div className="skeleton-user-bubble">
+                          <span className="skeleton-line skeleton-medium" />
+                        </div>
+                      </div>
+                      <div className="skeleton-message skeleton-assistant">
+                        <div className="skeleton-heading">
+                          <span className="skeleton-avatar" />
+                          <span className="skeleton-line skeleton-name" />
+                        </div>
+                        <div className="skeleton-body">
+                          <span className="skeleton-line skeleton-wide" />
+                          <span className="skeleton-line skeleton-wide" />
+                          <span className="skeleton-line skeleton-medium" />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {!historical.active && rows.length === 0 && !loadingSession && !creatingSession && (
+                  <div className="welcome">
+                    <div className="welcome-symbol">
+                      <Mark large />
+                      <span>{project?.name ?? "rpi workspace"}</span>
+                    </div>
+                    <h2>{t("welcomeTitle")}</h2>
+                    <p>{t("welcomeDescription")}</p>
+                    {!sessionId && (
+                      <button
+                        className="start-project-chat"
+                        disabled={creatingSession}
+                        onClick={() => void createSession()}
+                      >
+                        {creatingSession ? (
+                          <Loader2 className="spin" size={15} />
+                        ) : (
+                          <ArrowUp size={15} />
+                        )}
+                        {language === "zh"
+                          ? "在此项目中开始会话"
+                          : "Start a chat in this project"}
+                      </button>
+                    )}
+                    <div className="suggestions">
+                      <button
+                        onClick={() =>
+                          updateDraft(t("explainProjectPrompt"))
+                        }
+                      >
+                        <Sparkles size={17} /> {t("explainProject")}
+                      </button>
+                      <button
+                        onClick={() =>
+                          updateDraft(t("reviewChangesPrompt"))
+                        }
+                      >
+                        <Code2 size={17} /> {t("reviewChanges")}
+                      </button>
+                      <button
+                        onClick={() => updateDraft(t("findTodoPrompt"))}
+                      >
+                        <Bot size={17} /> {t("findTodo")}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                <ProjectImageContext.Provider value={project}>
+                  <ToolNameModeContext.Provider value={toolNameMode}>
+                    <ToolProgramProvider key={`${traceBinding}:${historical.active}:${historical.target?.entryId ?? ""}:${historical.page?.firstId ?? ""}`} sessionId={sessionId} enabled={!loadingSession && !connectionFailed}>
+                    {displayedRows.map((row) => {
+                      // A historical window may begin mid-run, without all run
+                      // boundaries. Keep every update visible instead of folding
+                      // separate executions into an apparently current todo card.
+                      const group = historical.active ? undefined : todoGroups.get(row.id);
+                      return (
+                        <div
+                          className="transcript-row"
+                          data-transcript-row={row.id}
+                          key={row.id}
+                        >
+                          {group !== null && (
+                            <RowView
+                              row={group?.latest ?? row}
+                              todoHistory={group?.previous}
+                              language={language}
+                              onSpeak={speakMessage}
+                              readingRowId={readingRowId}
+                              onFork={(entryId) => void forkCurrent(entryId)}
+                              forkPending={forkPending}
+                            />
+                          )}
+                          {group !== null && row.kind === "tool" && parentToolCallId(row) && (
+                            <ToolProgramChildren rootCallId={parentToolCallId(row)!} rootToolName={row.name} language={language} />
+                          )}
+                          {runFooters.get(row.id)?.map((timing) => (
+                            <RunElapsed key={timing.runId} timing={timing} language={language} />
+                          ))}
+                        </div>
+                      );
+                    })}
+                    </ToolProgramProvider>
+                  </ToolNameModeContext.Provider>
+                </ProjectImageContext.Provider>
+
+                {!historical.active && busy && rows.length > 0 && (
+                  <div className="working-indicator">
+                    <Loader2 size={14} className="spin" />{" "}
+                    {dialog ? t("waitingForAnswer") : t("waiting")}
+                  </div>
+                )}
+              </div>
+            </div>
+            {timelineOpen && (!loadingSession || rows.length > 0) && (
+              <ConversationTimeline
+                key={`${sessionId}:${connectionRevision}:${navigationRevision.current}`}
+                sessionId={sessionId}
+                nativeQueries={nativeMessageQueries}
+                snapshotLeafId={leafId}
+                onHistoryNavigate={(target) => {
+                  followingRef.current = false;
+                  setFollowing(false);
+                  continueEarlier.current = null;
+                  historical.open(target);
+                }}
+                rows={displayedRows}
+                transcript={transcriptRef}
+                language={language}
+                hasMore={hasMore}
+                historyCursor={firstId}
+                loadingEarlier={loadingEarlier || loadingSession || mutationPending}
+                onLoadEarlier={() => loadEarlier(false, "timeline")}
+                onNavigate={(target) => {
+                  const node = transcriptRef.current;
+                  if (!node || !node.contains(target)) return;
+                  if (historical.active && historical.loading) historical.cancelPending();
+                  followingRef.current = false;
+                  setFollowing(false);
+                  // Scrubbing to the first tick is navigation, not a transcript
+                  // paging gesture. The timeline owns its bounded edge load.
+                  autoEarlierCursor.current = `${navigationRevision.current}:${sessionId}:${firstId}`;
+                  continueEarlier.current = null;
+                  node.scrollTop += target.getBoundingClientRect().top - node.getBoundingClientRect().top - 12;
+                  rememberTranscriptPosition();
+                }}
+              />
+            )}
+            </div>
+            {(historical.active || (!following && rows.length > 0)) && (
+              <button
+                type="button"
+                className="jump-to-bottom"
+                aria-label={t("jumpToBottom")}
+                onClick={() => {
+                  historical.close();
+                  followingRef.current = true;
+                  setFollowing(true);
+                  if (!historical.active) transcriptRef.current?.scrollTo({
+                    top: transcriptRef.current.scrollHeight,
+                    behavior: "smooth",
+                  });
+                  // History and live are different bounded windows, not adjacent
+                  // rows. The viewport hook aligns the committed live DOM below.
+                }}
+              >
+                <ArrowDown size={14} aria-hidden="true" />
+                <span>{t("jumpToBottom")}</span>
+              </button>
+            )}
+
+            <form className="composer-area" onSubmit={submit}>
+              {slashMatches.length > 0 && (
+                <div className="slash-menu">
+                  {slashMatches.map((command) => (
+                    <button
+                      type="button"
+                      key={command.name}
+                      className="slash-item"
+                      disabled={!command.enabled || ((loadingSession || connectionFailed) && !LOCAL_SLASH_COMMANDS.has(command.name))}
+                      onClick={() => void runSlash(command.name)}
+                    >
+                      <code>{command.usage}</code>
+                      <span className="muted">{command.hint}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              {pendingQueueItems.length > 0 && (
+                <div
+                  className={`composer-queue-panel${queueOpen ? " is-open" : ""}`}
+                  aria-label={t("queue")}
+                >
+                  <button
+                    type="button"
+                    className="composer-queue-heading"
+                    aria-label={t(queueOpen ? "closeQueue" : "viewQueue")}
+                    aria-expanded={queueOpen}
+                    onClick={() => setQueueOpen((value) => !value)}
+                  >
+                    <span>
+                      <ListTodo size={13} aria-hidden="true" />
+                      <em>{pendingQueueItems.length}</em>
+                      {!queueOpen && pendingQueueItems[0]?.text && (
+                        <span className="composer-queue-preview">
+                          {pendingQueueItems[0].text}
+                        </span>
+                      )}
+                    </span>
+                    <ChevronDown size={14} aria-hidden="true" />
+                  </button>
+                  <div className="composer-queue-list">
+                      {pendingQueueItems.map((item) => (
+                        <div className="composer-queue-item" key={item.entryId}>
+                          <span>{item.text || t("nonTextMessage")}</span>
+                          {isEditableQueueItem(item) && (
+                            <span className="queue-item-actions">
+                              {item.text?.trim() &&
+                                !busy &&
+                                supported.has("prompt") &&
+                                supported.has("cancel_queued") && (
+                                  <button
+                                    type="button"
+                                    className="icon-button queue-send-now"
+                                    aria-label={`${t("sendNow")}: ${item.text}`}
+                                    title={t("sendNow")}
+                                    onClick={() =>
+                                      void sendQueuedNow(item.entryId)
+                                    }
+                                    disabled={queueRunning}
+                                  >
+                                    {queueRunning ? (
+                                      <Loader2 size={13} className="spin" />
+                                    ) : (
+                                      <Play size={13} />
+                                    )}
+                                  </button>
+                                )}
+                              <button
+                                type="button"
+                                className="icon-button"
+                                aria-label={t("editQueued")}
+                                title={t("editQueued")}
+                                onClick={() => editQueued(item)}
+                              >
+                                <SquarePen size={13} />
+                              </button>
+                              <button
+                                type="button"
+                                className="icon-button"
+                                aria-label={t("cancelQueued")}
+                                title={t("cancelQueued")}
+                                onClick={() => void cancelQueued(item.entryId)}
+                              >
+                                <X size={13} />
+                              </button>
+                            </span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                </div>
+              )}
+              <div className="composer">
+                <ProjectContext
+                  project={project}
+                  tick={settleTick}
+                  language={language}
+                  loadGit={actions.has("git_diff")}
+                  onOpen={() => {
+                    setSidebar(true);
+                    requestAnimationFrame(() =>
+                      document
+                        .querySelector<HTMLElement>(
+                          ".selected-project .project-name",
+                        )
+                        ?.focus(),
+                    );
+                  }}
+                />
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  hidden
+                  onChange={(event) => {
+                    const files = Array.from(event.currentTarget.files ?? []);
+                    // Reset before uploading so cancellation and selecting the
+                    // identical file again always produce a fresh change event.
+                    event.currentTarget.value = "";
+                    void uploadFiles(files);
+                  }}
+                />
+                {attachments.length > 0 && (
+                  <div
+                    className="composer-attachments"
+                    aria-label={t("attachedFiles")}
+                  >
+                    {attachments.map((file) => (
+                      <AttachmentCard
+                        key={file.path}
+                        {...file}
+                        language={language}
+                        onRemove={() => removeAttachment(file.path)}
+                      />
+                    ))}
+                  </div>
+                )}
+                <textarea
+                  ref={composerInputRef}
+                  value={draft}
+                  onPaste={(event) => {
+                    if (!sessionId || !projectId) return;
+                    const clipboard = event.clipboardData;
+                    const files = Array.from(clipboard.files);
+                    // Some browsers expose clipboard files only through items.
+                    if (!files.length) {
+                      for (const item of Array.from(clipboard.items)) {
+                        if (item.kind !== "file") continue;
+                        const file = item.getAsFile();
+                        if (file) files.push(file);
+                      }
+                    }
+                    if (!files.length) return; // Keep native text paste/selection.
+                    event.preventDefault();
+                    void uploadFiles(files);
+                  }}
+                  onChange={(event) => {
+                    updateDraft(event.target.value, sessionId);
+                  }}
+                  onKeyDown={(event) => {
+                    if (
+                      event.key === "Enter" &&
+                      !event.shiftKey &&
+                      !event.nativeEvent.isComposing &&
+                      event.nativeEvent.keyCode !== 229
+                    ) {
+                      event.preventDefault();
+                      void submit();
+                    }
+                  }}
+                  placeholder={t("sendPlaceholder")}
+                  disabled={!sessionId}
+                  aria-label={t("sendPlaceholder")}
+                  aria-keyshortcuts="Shift+Enter"
+                />
+                <div className="composer-footer">
+                  <div className="composer-options">
+                    <button
+                      type="button"
+                      className="composer-attach"
+                      aria-label={t("attachFiles")}
+                      title={t("attachFiles")}
+                      disabled={!sessionId || !projectId || uploading}
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      {uploading ? (
+                        <Loader2 className="spin" size={14} />
+                      ) : (
+                        <Paperclip size={14} />
+                      )}
+                      <span className="sr-only">
+                        {uploading ? t("uploading") : t("attachFiles")}
+                      </span>
+                    </button>
+                    <div className="composer-runtime-controls">
+                      {supported.has("set_model") && (
+                        <ModelPicker
+                          language={language}
+                          runtime={runtime}
+                          models={models}
+                          supported={supported}
+                          pending={modelPending}
+                          onSelect={(entry) => void selectModel(entry)}
+                        />
+                      )}
+                      {supported.has("set_thinking_level") && (
+                        <ThinkingPicker
+                          language={language}
+                          runtime={runtime}
+                          levels={levels}
+                          supported={supported}
+                          pending={thinkingPending}
+                          onSelect={(level) => void selectThinkingLevel(level)}
+                        />
+                      )}
+                    </div>
+                    <span
+                      className="composer-shortcut-hint"
+                      title={t("shiftEnterNewline")}
+                    >
+                      <kbd>Shift</kbd>
+                      <span aria-hidden="true">+</span>
+                      <kbd>Enter</kbd>
+                      <span>{t("shiftEnterNewline")}</span>
+                    </span>
+                    {queueEditId && (
+                      <button
+                        type="button"
+                        className="composer-queue-editing"
+                        onClick={cancelQueueEdit}
+                        title={t("cancelQueueEdit")}
+                      >
+                        {t("editQueued")} <X size={11} />
+                      </button>
+                    )}
+                  </div>
+                  <div className="composer-controls">
+                    <button
+                      type={composerAbort ? "button" : "submit"}
+                      className={`send-button${composerAbort ? " composer-action-stop" : composerContinue ? " composer-action-continue" : ""}`}
+                      aria-label={composerAbort ? t("abort") : composerContinue ? t("continue") : t("send")}
+                      title={composerAbort ? t("abort") : composerContinue ? t("continue") : t("send")}
+                      disabled={
+                        (!localSlash && (loadingSession || connectionFailed)) ||
+                        (!composerAbort && (
+                          (!composerContinue && !draft.trim() && attachments.length === 0) ||
+                          !sessionId || sending || uploading
+                        ))
+                      }
+                      onClick={composerAbort ? () => void abort() : undefined}
+                    >
+                      {composerAbort ? (
+                        <span className="stop-indicator" aria-hidden="true" />
+                      ) : composerContinue ? (
+                        <Play size={17} aria-hidden="true" />
+                      ) : (
+                        <ArrowUp size={17} />
+                      )}
+                    </button>
+                  </div>
+                </div>
+                <details
+                  className="composer-metrics"
+                  aria-label={`${t("inputTokens")}, ${t("outputTokens")}, ${t("totalTokens")}, ${t("cacheHit")}, ${t("context")}, ${t("cachedTokens")}, ${t("toolCalls")}, ${t("operations")}, ${t("cost")}, ${t("eventsObserved")}`}
+                >
+                  <summary className="composer-metrics-summary">
+                    <span
+                      className="composer-metric"
+                      title={t("inputTokens")}
+                      aria-label={`${t("inputTokens")}: ${inputTokenCount(displayStats) == null ? "—" : formatTokens(inputTokenCount(displayStats)!)}`}
+                    >
+                      <ArrowDown size={12} aria-hidden="true" />
+                      <strong>
+                        {inputTokenCount(displayStats) == null
+                          ? "—"
+                          : formatTokens(inputTokenCount(displayStats)!)}
+                      </strong>
+                    </span>
+                    <span
+                      className="composer-metric"
+                      title={t("outputTokens")}
+                      aria-label={`${t("outputTokens")}: ${outputTokenCount(displayStats) == null ? "—" : formatTokens(outputTokenCount(displayStats)!)}`}
+                    >
+                      <ArrowUp size={12} aria-hidden="true" />
+                      <strong>
+                        {outputTokenCount(displayStats) == null
+                          ? "—"
+                          : formatTokens(outputTokenCount(displayStats)!)}
+                      </strong>
+                    </span>
+                    <span
+                      className="composer-metric"
+                      title={t("cacheHit")}
+                      aria-label={`${t("cacheHit")}: ${cacheHitRatio(displayStats) == null ? "—" : `${Math.round(cacheHitRatio(displayStats)! * 100)}%`}`}
+                    >
+                      <Database size={12} aria-hidden="true" />
+                      <strong>
+                        {cacheHitRatio(displayStats) == null
+                          ? "—"
+                          : `${Math.round(cacheHitRatio(displayStats)! * 100)}%`}
+                      </strong>
+                    </span>
+                    <span
+                      className="composer-metric"
+                      title={`${t("context")}: ${runtime?.context ? `${formatTokens(runtime.context.tokens)} / ${formatTokens(runtime.context.window)} (${runtime.context.percent}%)` : "—"}`}
+                      aria-label={`${t("context")}: ${runtime?.context ? `${formatTokens(runtime.context.tokens)} / ${formatTokens(runtime.context.window)}` : "—"}`}
+                    >
+                      <Gauge size={12} aria-hidden="true" />
+                      <strong>
+                        {runtime?.context
+                          ? `${formatTokens(runtime.context.tokens)} / ${formatTokens(runtime.context.window)}`
+                          : "—"}
+                      </strong>
+                    </span>
+                    <span className="composer-metrics-more">
+                      {t("details")}
+                    </span>
+                  </summary>
+                  <div className="composer-metrics-detail">
+                    <span
+                      className="composer-metric"
+                      title={t("cachedTokens")}
+                      aria-label={`${t("cachedTokens")}: ${cachedTokenCount(displayStats) == null ? "—" : formatTokens(cachedTokenCount(displayStats)!)}`}
+                    >
+                      <Database size={12} aria-hidden="true" />
+                      <strong>
+                        {cachedTokenCount(displayStats) == null
+                          ? "—"
+                          : formatTokens(cachedTokenCount(displayStats)!)}
+                      </strong>
+                    </span>
+                    <span
+                      className="composer-metric"
+                      title={t("totalTokens")}
+                      aria-label={`${t("totalTokens")}: ${totalTokenCount(displayStats) == null ? "—" : formatTokens(totalTokenCount(displayStats)!)}`}
+                    >
+                      <Sigma size={12} aria-hidden="true" />
+                      <strong>
+                        {totalTokenCount(displayStats) == null
+                          ? "—"
+                          : formatTokens(totalTokenCount(displayStats)!)}
+                      </strong>
+                    </span>
+
+                    <span
+                      className="composer-metric"
+                      title={t("toolCalls")}
+                      aria-label={`${t("toolCalls")}: ${rows.filter((row) => row.kind === "tool").length}`}
+                    >
+                      <Wrench size={12} aria-hidden="true" />
+                      <strong>
+                        {rows.filter((row) => row.kind === "tool").length}
+                      </strong>
+                    </span>
+                    <span
+                      className="composer-metric"
+                      title={t("operations")}
+                      aria-label={`${t("operations")}: ${runtime?.stats?.operationCount ?? historyData?.total ?? 0}`}
+                    >
+                      <History size={12} aria-hidden="true" />
+                      <strong>
+                        {runtime?.stats?.operationCount ??
+                          historyData?.total ??
+                          0}
+                      </strong>
+                    </span>
+                    <span
+                      className="composer-metric"
+                      title={t("cost")}
+                      aria-label={`${t("cost")}: ${costTotal(displayStats) == null ? "—" : `$${costTotal(displayStats)!.toFixed(4)}`}`}
+                    >
+                      <CircleDollarSign size={12} aria-hidden="true" />
+                      <strong>
+                        {costTotal(displayStats) == null
+                          ? "—"
+                          : `$${costTotal(displayStats)!.toFixed(4)}`}
+                      </strong>
+                    </span>
+                    <span
+                      className="composer-metric"
+                      title={t("eventsObserved")}
+                      aria-label={`${t("eventsObserved")}: ${seen}`}
+                    >
+                      <Activity size={12} aria-hidden="true" />
+                      <strong>{seen}</strong>
+                    </span>
+                  </div>
+                </details>
+              </div>
+            </form>
+          </div>
+
+          {(panel ||
+            inspector ||
+            (traceOpen && sessionId) ||
+            (workbenchOpen && project && actions.has("files"))) && (
+            <Splitter
+              label={t("resizeWorkbench")}
+              value={workbenchWidth}
+              min={300}
+              max={900}
+              reverse
+              onChange={setWorkbenchWidth}
+            />
+          )}
+          {workbenchOpen &&
+            project &&
+            actions.has("files") &&
+            !panel &&
+            !inspector && (
+              <Workbench
+                key={project.id}
+                project={project}
+                language={language}
+                tick={settleTick}
+                onClose={() => setWorkbenchOpen(false)}
+              />
+            )}
+          {panel && sessionId && (
+            <RuntimePanel
+              key={`${sessionId}:${navigationRevision.current}`}
+              language={language}
+              sessionId={sessionId}
+              supported={supported}
+              canAuth={actions.has("provider_auth")}
+              runtime={runtime}
+              onChange={setRuntime}
+              onError={setError}
+              autoRead={autoRead}
+              onAutoRead={setAutoRead}
+              onClose={() => setPanel(false)}
+            />
+          )}
+
+          {traceOpen && sessionId && (
+            <ExecutionTrace
+              key={traceBinding}
+              view={executionTrace}
+              language={language}
+              onClose={() => {
+                setTraceOpen(false);
+                traceButtonRef.current?.focus();
+              }}
+            />
+          )}
+
+          {inspector && (
+            <aside className="inspector">
+              <div className="panel-heading">
+                <h2>{t("inspector")}</h2>
+                <button
+                  className="icon-button"
+                  onClick={() => setInspector(false)}
+                  aria-label={t("closePanel")}
+                  title={t("closePanel")}
+                >
+                  <X size={15} />
+                </button>
+              </div>
+              <div className="stat-row">
+                <span>{t("protocol")}</span>
+                <strong>{capabilities?.protocol ?? "—"}</strong>
+              </div>
+              <div className="stat-row">
+                <span>{t("settlement")}</span>
+                <strong>agent_settled</strong>
+              </div>
+              <div className="stat-row">
+                <span>{t("session")}</span>
+                <strong>{sessionId.slice(0, 8) || "—"}</strong>
+              </div>
+              <div className="stat-row">
+                <span>{t("leaf")}</span>
+                <strong>{leafId ? leafId.slice(0, 8) : "—"}</strong>
+              </div>
+              <div className="stat-row">
+                <span>{t("eventsObserved")}</span>
+                <strong>{seen}</strong>
+              </div>
+              <div className="stat-row">
+                <span>{t("context")}</span>
+                <strong>
+                  {runtime?.context
+                    ? `${runtime.context.percent}% / ${formatTokens(runtime.context.window)}`
+                    : "—"}
+                </strong>
+              </div>
+              <div className="stat-row">
+                <span>{t("toolCalls")}</span>
+                <strong>
+                  {rows.filter((row) => row.kind === "tool").length}
+                </strong>
+              </div>
+              <div className="stat-row">
+                <span>{t("operations")}</span>
+                <strong>{historyData?.total ?? 0}</strong>
+              </div>
+              {displayStats && (
+                <>
+                  <div className="stat-row">
+                    <span>{t("tokens")}</span>
+                    <strong>
+                      {totalTokenCount(displayStats) == null
+                        ? "—"
+                        : formatTokens(totalTokenCount(displayStats)!)}
+                    </strong>
+                  </div>
+                  <div className="stat-row">
+                    <span>{t("inputTokens")}</span>
+                    <strong>
+                      {inputTokenCount(displayStats) == null
+                        ? "—"
+                        : formatTokens(inputTokenCount(displayStats)!)}
+                    </strong>
+                  </div>
+                  <div className="stat-row">
+                    <span>{t("outputTokens")}</span>
+                    <strong>
+                      {outputTokenCount(displayStats) == null
+                        ? "—"
+                        : formatTokens(outputTokenCount(displayStats)!)}
+                    </strong>
+                  </div>
+                  <div className="stat-row">
+                    <span>{t("cachedTokens")}</span>
+                    <strong>
+                      {cachedTokenCount(displayStats) == null
+                        ? "—"
+                        : formatTokens(cachedTokenCount(displayStats)!)}
+                    </strong>
+                  </div>
+                  <div className="stat-row">
+                    <span>{t("cost")}</span>
+                    <strong>
+                      {costTotal(displayStats) == null
+                        ? "—"
+                        : `$${costTotal(displayStats)!.toFixed(4)}`}
+                    </strong>
+                  </div>
+                  <div className="stat-row">
+                    <span>{t("cacheHit")}</span>
+                    <strong>
+                      {cacheHitRatio(displayStats) == null
+                        ? "—"
+                        : `${Math.round(cacheHitRatio(displayStats)! * 100)}%`}
+                    </strong>
+                  </div>
+                  <div className="stats-breakdown">
+                    <div className="muted">
+                      {displayStats.provider ?? t("unknownProvider")} ·{" "}
+                      {displayStats.modelId ?? t("unknownModel")}
+                    </div>
+                    {Object.entries(displayStats.operationCounts ?? {}).map(
+                      ([name, value]) => {
+                        const maximum = Math.max(
+                          1,
+                          ...Object.values(displayStats.operationCounts ?? {}),
+                        );
+                        return (
+                          <div className="stats-bar-row" key={name}>
+                            <span>{valueLabel(language, name)}</span>
+                            <span className="stats-bar-track">
+                              <span
+                                className="stats-bar-fill"
+                                style={{ width: `${(value / maximum) * 100}%` }}
+                              />
+                            </span>
+                            <strong>{value}</strong>
+                          </div>
+                        );
+                      },
+                    )}
+                  </div>
+                </>
+              )}
+              {actions.has("provider_auth") &&
+                supported.has("get_auth_status") && (
+                  <section className="diagnostic-section">
+                    <h3 className="panel-heading">
+                      <span>
+                        <ShieldCheck size={14} /> {t("providerAuth")}
+                      </span>
+                    </h3>
+                    <div className="auth-provider-list">
+                      {authProviders.map((provider) => (
+                        <div
+                          className="auth-provider-row"
+                          key={provider.provider}
+                        >
+                          <button
+                            type="button"
+                            className={`auth-provider ${authProvider === provider.provider ? "selected" : ""}`}
+                            onClick={() => {
+                              credentialRevision.current++;
+                              setAuthProvider(provider.provider);
+                              setApiKeyDraft("");
+                              setAuthMessage(null);
+                            }}
+                          >
+                            <strong>{provider.provider}</strong>
+                            <span>
+                              {provider.ready
+                                ? valueLabel(language, provider.source)
+                                : t("notConfigured")}
+                              {provider.oauth && provider.source !== "oauth"
+                                ? " · OAuth"
+                                : ""}
+                            </span>
+                          </button>
+                          {provider.oauth && (
+                            <button
+                              className="icon-button"
+                              title={t("refresh")}
+                              aria-label={`${t("refresh")} ${provider.provider} OAuth`}
+                              onClick={() =>
+                                void refreshOAuth(provider.provider)
+                              }
+                            >
+                              <RefreshCw size={14} />
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                    {supported.has("oauth") &&
+                      authProvider &&
+                      authProviders.find(
+                        (item) => item.provider === authProvider,
+                      )?.oauthAvailable && (
+                        <button
+                          type="button"
+                          className="text-button"
+                          onClick={() => void startOAuth(authProvider)}
+                        >
+                          {t("oauthSignIn")}
+                        </button>
+                      )}
+                    {supported.has("set_api_key") && authProvider && (
+                      <div className="auth-compose">
+                        <input
+                          type="password"
+                          autoComplete="new-password"
+                          value={apiKeyDraft}
+                          onChange={(event) => {
+                            credentialRevision.current++;
+                            setApiKeyDraft(event.target.value);
+                          }}
+                          placeholder={t("apiKeyFor", {
+                            provider: authProvider,
+                          })}
+                          aria-label={t("apiKeyFor", {
+                            provider: authProvider,
+                          })}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") void saveApiKey();
+                          }}
+                        />
+                        <button
+                          type="button"
+                          disabled={!apiKeyDraft.trim()}
+                          onClick={() => void saveApiKey()}
+                        >
+                          {t("saveKey")}
+                        </button>
+                      </div>
+                    )}
+                    {authMessage && (
+                      <p className="muted">
+                        {t(authMessage.key, {
+                          ...authMessage.values,
+                          ...(authMessage.values.status
+                            ? {
+                                status: valueLabel(
+                                  language,
+                                  authMessage.values.status,
+                                ),
+                              }
+                            : {}),
+                        })}
+                      </p>
+                    )}
+                  </section>
+                )}
+              {actions.has("queue") && supported.has("get_queue") && (
+                <section className="diagnostic-section">
+                  <h3 className="panel-heading">
+                    <span>
+                      <ListTodo size={14} /> {t("queue")}
+                    </span>
+                    <span className="panel-heading-actions">
+                      <strong>{queueItems.length}</strong>
+                      {actions.has("queue_status") && (
+                        <button
+                          type="button"
+                          className="text-button"
+                          onClick={() => setShowQueueHistory((value) => !value)}
+                        >
+                          {t(showQueueHistory ? "queuePending" : "history")}
+                        </button>
+                      )}
+                      {supported.has("clear_queue") &&
+                        queueItems.some((item) =>
+                          isEditableQueueItem(item),
+                        ) && (
+                          <button
+                            type="button"
+                            className="text-button"
+                            onClick={() => void clearQueue()}
+                          >
+                            {t("clear")}
+                          </button>
+                        )}
+                    </span>
+                  </h3>
+                  {queueItems.map((item) => (
+                    <div className="queue-item" key={item.entryId}>
+                      <div>
+                        <strong>
+                          {valueLabel(language, item.queue)} ·{" "}
+                          {valueLabel(language, item.status ?? "queued")}
+                        </strong>
+                        <span>{item.text || t("nonTextMessage")}</span>
+                        {item.runId && (
+                          <small>
+                            {t("runLabel")} {item.runId.slice(0, 10)}
+                          </small>
+                        )}
+                      </div>
+                      {isEditableQueueItem(item) && (
+                        <span className="queue-item-actions">
+                          {item.text?.trim() &&
+                            !busy &&
+                            supported.has("prompt") &&
+                            supported.has("cancel_queued") && (
+                              <button
+                                type="button"
+                                className="icon-button queue-send-now"
+                                title={t("sendNow")}
+                                aria-label={`${t("sendNow")}: ${item.text}`}
+                                onClick={() =>
+                                  void sendQueuedNow(item.entryId)
+                                }
+                                disabled={queueRunning}
+                              >
+                                {queueRunning ? (
+                                  <Loader2 size={13} className="spin" />
+                                ) : (
+                                  <Play size={13} />
+                                )}
+                              </button>
+                            )}
+                          <button
+                            type="button"
+                            className="icon-button"
+                            title={t("editQueued")}
+                            aria-label={t("editQueued")}
+                            onClick={() => editQueued(item)}
+                          >
+                            <SquarePen size={13} />
+                          </button>
+                          <button
+                            type="button"
+                            className="icon-button"
+                            title={t("cancelQueued")}
+                            aria-label={t("cancelQueued")}
+                            onClick={() => void cancelQueued(item.entryId)}
+                          >
+                            <X size={13} />
+                          </button>
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                  {supported.has("queue_message") && !queueEditId && (
+                    <div className="queue-compose">
+                      <input
+                        ref={queueInputRef}
+                        value={queueDraft}
+                        onChange={(event) => {
+                          queueDraftRevision.current++;
+                          setQueueDraft(event.target.value);
+                        }}
+                        placeholder={t("queuePlaceholder")}
+                        aria-label={t("queuePlaceholder")}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") void queuePrompt();
+                        }}
+                      />
+                      <MenuSelect
+                        label={t("queueKind")}
+                        value={queueKind}
+                        onChange={setQueueKind}
+                        options={[
+                          { value: "followUp", label: t("followUp") },
+                          { value: "steer", label: t("steer") },
+                          { value: "nextTurn", label: t("nextTurn") },
+                        ]}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => void queuePrompt()}
+                        disabled={!queueDraft.trim()}
+                      >
+                        {t("queue")}
+                      </button>
+                    </div>
+                  )}
+                </section>
+              )}
+              {actions.has("history") && historyData && (
+                <section className="diagnostic-section">
+                  <h3 className="panel-heading">
+                    <span>
+                      <History size={14} /> {t("history")}
+                    </span>
+                    <span className="panel-heading-actions">
+                      <strong>{historyData.total}</strong>
+                      {historyHasMore && (
+                        <button
+                          type="button"
+                          className="text-button"
+                          disabled={historyLoading}
+                          onClick={() => void loadOlderHistory()}
+                        >
+                          {t(historyLoading ? "loading" : "older")}
+                        </button>
+                      )}
+                    </span>
+                  </h3>
+                  {persistedSettlementRows(historyData).length > 0 && (
+                    <p className="muted">{t("settlementsRestored")}</p>
+                  )}
+                  {historyData.openOperations &&
+                    historyData.openOperations.length > 0 && (
+                      <div className="history-open-operations">
+                        <div className="history-subheading">
+                          <Loader2 size={12} /> {t("activeOperations")}
+                        </div>
+                        {historyData.openOperations.map((operation, index) => (
+                          <details
+                            className="history-item operation-open"
+                            key={String(
+                              operation.id ?? operation.runId ?? index,
+                            )}
+                            open
+                          >
+                            <summary>
+                              <strong>
+                                {historyRecordLabel({
+                                  ...operation,
+                                  type: operation.type ?? "operation",
+                                })}
+                              </strong>
+                              <span>{t("toolRunning")}</span>
+                            </summary>
+                            <pre>{historyRecordDetails(operation)}</pre>
+                          </details>
+                        ))}
+                      </div>
+                    )}
+                  <div className="history-list history-timeline">
+                    {historyData.records
+                      .slice()
+                      .reverse()
+                      .map((record) => {
+                        const target =
+                          typeof record.sourceLeafId === "string"
+                            ? record.sourceLeafId
+                            : null;
+                        const recordId = String(record.id ?? record.seq);
+                        const time = historyRecordTime(record);
+                        const runId =
+                          typeof record.runId === "string"
+                            ? record.runId.slice(0, 12)
+                            : null;
+                        return (
+                          <details
+                            className="history-item history-timeline-item"
+                            key={recordId}
+                          >
+                            <summary>
+                              <div>
+                                <strong>{historyRecordLabel(record)}</strong>
+                                <span>
+                                  {t("sequenceLabel")}{" "}
+                                  {String(record.seq ?? "—")}
+                                  {time ? ` · ${time}` : ""}
+                                </span>
+                                {runId && (
+                                  <span>
+                                    {t("runLabel")} {runId}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="history-summary-status">
+                                {Boolean(record.outcome) && (
+                                  <span>
+                                    {valueLabel(
+                                      language,
+                                      String(record.outcome),
+                                    )}
+                                  </span>
+                                )}
+                                {Boolean(record.error) &&
+                                  typeof record.error === "object" && (
+                                    <span className="error-text">
+                                      {String(
+                                        (record.error as { message?: unknown })
+                                          .message ?? "error",
+                                      )}
+                                    </span>
+                                  )}
+                              </div>
+                            </summary>
+                            <div className="history-detail">
+                              <pre>{historyRecordDetails(record)}</pre>
+                              {target && actions.has("history_mutation") && (
+                                <div className="history-actions">
+                                  <button
+                                    title={t("forkHere")}
+                                    disabled={mutationPending || forkPending}
+                                    onClick={() => void forkCurrent(target)}
+                                  >
+                                    <GitBranch size={12} /> {t("fork")}
+                                  </button>
+                                  <button
+                                    title={t("rewindHere")}
+                                    disabled={mutationPending}
+                                    onClick={() => void rewindTo(target)}
+                                  >
+                                    <RotateCcw size={12} /> {t("rewind")}
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          </details>
+                        );
+                      })}
+                  </div>
+                </section>
+              )}
+              <div className="stat-row">
+                <span>{t("activeTools")}</span>
+                <strong>{runtime?.activeTools?.length ?? 0}</strong>
+              </div>
+              <h3 className="panel-heading">{t("capabilities")}</h3>
+              <div className="tool-stack capability-list">
+                {capabilities?.supportedCommands.map((command) => (
+                  <span className="badge" key={command}>
+                    {command}
+                  </span>
+                ))}
+              </div>
+            </aside>
+          )}
+        </main>
+      </section>
+    </div>
+  );
+}
+
+function DialogOverlay({
+  dialog,
+  answer,
+  busy,
+  language,
+  onAnswer,
+  onSubmit,
+  onCancel,
+}: {
+  dialog: UiDialog;
+  answer: string;
+  busy: boolean;
+  language: Language;
+  onAnswer: (value: string) => void;
+  onSubmit: (value: unknown) => void;
+  onCancel: () => void;
+}) {
+  const t = (key: Parameters<typeof translate>[1]) => translate(language, key);
+  const ui = dialog.ui;
+  const options = ui.options ?? [];
+  const structured =
+    ui.purpose !== "permission" &&
+    (ui.kind === "selector" || ui.kind === "input");
+  const multiple = structured && !!ui.allowMultiple;
+  const comment = structured && !!ui.allowComment;
+  const [selected, setSelected] = useState<number[]>([]);
+  const optionValue = (index: number) =>
+    options[index].value ??
+    options[index].permission ??
+    options[index].title ??
+    String(index);
+  const freeform =
+    Boolean(ui.allowFreeform ?? ui.freeform) || options.length === 0;
+  const canSubmit = selected.length > 0 || (freeform && !!answer.trim());
+  const submit = () => {
+    if (!canSubmit || busy) return;
+    onSubmit(
+      structured
+        ? {
+            values: selected.length
+              ? selected.map((index) => String(optionValue(index)))
+              : [answer],
+            ...(answer.trim() && (ui.kind === "input" || comment)
+              ? { text: answer }
+              : {}),
+          }
+        : answer,
+    );
+  };
+  return (
+    <div className="dialog-backdrop" role="presentation">
+      <form
+        className="dialog-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="native-dialog-title"
+        onSubmit={(event) => {
+          event.preventDefault();
+          submit();
+        }}
+      >
+        <div className="dialog-heading">
+          <strong>
+            {ui.purpose === "permission" ? t("permission") : t("question")}
+          </strong>
+          <button
+            type="button"
+            className="icon-button"
+            onClick={onCancel}
+            aria-label={t("cancel")}
+          >
+            <X size={16} />
+          </button>
+        </div>
+        <h2 id="native-dialog-title">
+          {ui.question ?? ui.message ?? t("question")}
+        </h2>
+        {ui.context && <pre className="dialog-context">{ui.context}</pre>}
+        {options.length > 0 && (
+          <div className="dialog-options">
+            {options.map((option, index) => {
+              const value =
+                option.value ??
+                option.permission ??
+                option.title ??
+                String(index);
+              return (
+                <button
+                  type="button"
+                  key={`${option.title ?? "option"}-${index}`}
+                  disabled={busy}
+                  aria-pressed={
+                    multiple || comment ? selected.includes(index) : undefined
+                  }
+                  onClick={() => {
+                    if (multiple)
+                      setSelected((previous) =>
+                        previous.includes(index)
+                          ? previous.filter((item) => item !== index)
+                          : [...previous, index],
+                      );
+                    else if (comment) setSelected([index]);
+                    else
+                      onSubmit(
+                        structured ? { values: [String(value)] } : value,
+                      );
+                  }}
+                >
+                  <span>
+                    {option.title ?? String(value)}
+                    {option.description && <small>{option.description}</small>}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+        {(freeform || comment) && (
+          <>
+            <label htmlFor="dialog-answer">{t("answer")}</label>
+            <textarea
+              id="dialog-answer"
+              value={answer}
+              onChange={(event) => onAnswer(event.target.value)}
+              autoFocus
+              rows={4}
+              placeholder={ui.suggest}
+            />
+          </>
+        )}
+        {(freeform || multiple || comment) && (
+          <div className="dialog-actions">
+            <button type="button" onClick={onCancel} disabled={busy}>
+              {t("cancel")}
+            </button>
+            <button
+              type="submit"
+              className="primary"
+              disabled={busy || !canSubmit}
+            >
+              {t("submit")}
+            </button>
+          </div>
+        )}
+      </form>
+    </div>
+  );
+}
+
+function groupModels(models: ModelDescriptor[]): [string, ModelDescriptor[]][] {
+  const order: string[] = [];
+  const map = new Map<string, ModelDescriptor[]>();
+  for (const model of models) {
+    const list = map.get(model.provider);
+    if (list) list.push(model);
+    else {
+      order.push(model.provider);
+      map.set(model.provider, [model]);
+    }
+  }
+  return order.map((provider) => [provider, map.get(provider) ?? []]);
+}
+
+function Dropdown({
+  label,
+  className,
+  disabled = false,
+  align = "start",
+  trigger,
+  children,
+}: {
+  label: string;
+  className?: string;
+  disabled?: boolean;
+  align?: "start" | "end";
+  trigger: ReactNode;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const anchor = useRef<HTMLDivElement | null>(null);
+  const popover = useRef<HTMLDivElement | null>(null);
+  const [position, setPosition] = useState({ top: 0, left: 0, width: 220 });
+  useEffect(() => {
+    if (!open) return;
+    const closeOnPointer = (event: PointerEvent) => {
+      const target = event.target as Element;
+      if (
+        !target.closest("[data-dropdown]") &&
+        !target.closest(".dropdown-popover")
+      )
+        setOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    const closeOnScroll = () => setOpen(false);
+    document.addEventListener("pointerdown", closeOnPointer);
+    document.addEventListener("keydown", closeOnEscape);
+    window.addEventListener("resize", closeOnScroll);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnPointer);
+      document.removeEventListener("keydown", closeOnEscape);
+      window.removeEventListener("resize", closeOnScroll);
+    };
+  }, [open]);
+  useEffect(() => {
+    if (!open) return;
+    const frame = requestAnimationFrame(() => {
+      const box = anchor.current?.getBoundingClientRect();
+      const menu = popover.current;
+      if (!box || !menu) return;
+      const width = Math.max(box.width, 224);
+      const height = menu.getBoundingClientRect().height;
+      const viewportBottom = window.innerHeight - 8;
+      const below = box.bottom + 6;
+      const top =
+        below + height <= viewportBottom
+          ? below
+          : Math.max(8, box.top - height - 6);
+      const left = align === "end" ? box.right - width : box.left;
+      setPosition({
+        top: Math.min(top, Math.max(8, viewportBottom - height)),
+        left: Math.max(8, Math.min(left, window.innerWidth - width - 8)),
+        width,
+      });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [align, open]);
+  function toggle() {
+    if (!open && anchor.current) {
+      const box = anchor.current.getBoundingClientRect();
+      const width = Math.max(box.width, 224);
+      const left = align === "end" ? box.right - width : box.left;
+      setPosition({
+        top: Math.max(8, Math.min(box.bottom + 6, window.innerHeight - 220)),
+        left: Math.max(8, Math.min(left, window.innerWidth - width - 8)),
+        width,
+      });
+    }
+    setOpen((value) => !value);
+  }
+  return (
+    <div className="dropdown-anchor" data-dropdown ref={anchor}>
+      <button
+        type="button"
+        className={className}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label={label}
+        title={label}
+        disabled={disabled}
+        onClick={toggle}
+      >
+        {trigger}
+      </button>
+      {open &&
+        createPortal(
+          <div
+            ref={popover}
+            className="dropdown-popover"
+            role="listbox"
+            aria-label={label}
+            onClick={(event) => {
+              if ((event.target as Element).closest('[role="option"]')) {
+                setOpen(false);
+              }
+            }}
+            style={{
+              position: "fixed",
+              top: position.top,
+              left: position.left,
+              width: position.width,
+            }}
+          >
+            {children}
+          </div>,
+          document.body,
+        )}
+    </div>
+  );
+}
+
+function ModelPicker({
+  language,
+  runtime,
+  models,
+  supported,
+  pending,
+  className = "composer-model",
+  icon,
+  onSelect,
+}: {
+  language: Language;
+  runtime: RuntimeState | null;
+  models: ModelDescriptor[];
+  supported: Set<string>;
+  pending: boolean;
+  className?: string;
+  icon?: ReactNode;
+  onSelect: (model: ModelDescriptor) => void;
+}) {
+  const t = (key: MessageKey) => translate(language, key);
+  const currentKey = runtime?.modelId
+    ? modelKey({ id: runtime.modelId, provider: runtime.provider })
+    : "";
+  const current = models.find((entry) => modelKey(entry) === currentKey);
+  return (
+    <Dropdown
+      label={t("chooseModel")}
+      className={className}
+      disabled={!supported.has("set_model") || pending || models.length === 0}
+      trigger={
+        <>
+          {icon}
+          <span>{current?.name ?? runtime?.modelId ?? t("model")}</span>
+          <ChevronDown size={11} />
+        </>
+      }
+    >
+      {models.length === 0 ? (
+        <p className="dropdown-empty muted">{t("noModels")}</p>
+      ) : (
+        groupModels(models).map(([provider, entries]) => (
+          <div className="dropdown-group" key={provider}>
+            <div className="dropdown-group-label">{provider}</div>
+            {entries.map((entry) => {
+              const key = modelKey(entry);
+              const selected = key === currentKey;
+              return (
+                <button
+                  key={key}
+                  role="option"
+                  aria-selected={selected}
+                  className="dropdown-item"
+                  onClick={() => onSelect(entry)}
+                >
+                  <span>{entry.name}</span>
+                  {selected && <Check size={13} />}
+                </button>
+              );
+            })}
+          </div>
+        ))
+      )}
+    </Dropdown>
+  );
+}
+
+function ThinkingPicker({
+  language,
+  runtime,
+  levels,
+  supported,
+  pending,
+  className = "composer-thinking",
+  icon,
+  onSelect,
+}: {
+  language: Language;
+  runtime: RuntimeState | null;
+  levels: string[];
+  supported: Set<string>;
+  pending: boolean;
+  className?: string;
+  icon?: ReactNode;
+  onSelect: (level: string) => void;
+}) {
+  const t = (key: MessageKey) => translate(language, key);
+  const current = normalizeLevel(runtime?.thinkingLevel);
+  return (
+    <Dropdown
+      label={t("chooseThinking")}
+      className={className}
+      disabled={
+        !supported.has("set_thinking_level") || pending || levels.length === 0
+      }
+      trigger={
+        <>
+          {icon}
+          <span>
+            {current ? valueLabel(language, current) : t("thinkingLevel")}
+          </span>
+          <ChevronDown size={11} />
+        </>
+      }
+    >
+      {levels.length === 0 ? (
+        <p className="dropdown-empty muted">{t("noModels")}</p>
+      ) : (
+        levels.map((level) => {
+          const selected = level === current;
+          return (
+            <button
+              key={level}
+              role="option"
+              aria-selected={selected}
+              className="dropdown-item"
+              onClick={() => onSelect(level)}
+            >
+              <span>{valueLabel(language, level)}</span>
+              {selected && <Check size={13} />}
+            </button>
+          );
+        })
+      )}
+    </Dropdown>
+  );
+}
+
+function ImagePreview({
+  image,
+  language,
+}: {
+  image: ImageBlock;
+  language: Language;
+}) {
+  const project = useContext(ProjectImageContext);
+  const source = projectImageSource(
+    image.url ??
+      (image.data
+        ? image.data.startsWith("data:")
+          ? image.data
+          : `data:${image.mimeType || "image/png"};base64,${image.data}`
+        : ""),
+    project,
+  );
+  const isSafeImage =
+    source.startsWith("data:image/") ||
+    source.startsWith("/") ||
+    source.startsWith("https://") ||
+    source.startsWith("http://");
+  if (
+    !source ||
+    !isSafeImage ||
+    (image.mimeType && !image.mimeType.startsWith("image/"))
+  )
+    return null;
+  return (
+    <figure className="transcript-image">
+      <ZoomableImage src={source} alt={image.alt ?? ""} language={language} />
+    </figure>
+  );
+}
+
+const RowView = memo(function RowView({
+  row,
+  language,
+  todoHistory,
+  onSpeak,
+  readingRowId,
+  onFork,
+  forkPending,
+}: {
+  row: Row;
+  language: Language;
+  todoHistory?: ToolRow[];
+  onSpeak?: (rowId: string, text: string) => void;
+  readingRowId?: string | null;
+  onFork?: (entryId: string) => void;
+  forkPending?: boolean;
+}) {
+  const t = (key: MessageKey) => translate(language, key);
+  if (row.kind === "boundary") return null;
+  if (row.kind === "note") {
+    const values = row.translation?.values;
+    const isRunStatus =
+      row.translation?.key === "liveRun" ||
+      row.translation?.key === "restoredRun";
+    if (isRunStatus && values?.outcome === "completed" && !values.aborted && !values.reason) return null;
+    return (
+      <p className={`transcript-note muted${isRunStatus ? " run-status" : ""}`}>
+        {row.translation
+          ? translate(
+              language,
+              row.translation.key,
+              values?.outcome
+                ? {
+                    ...values,
+                    outcome: valueLabel(language, String(values.outcome)),
+                    ...(values.aborted
+                      ? {
+                          aborted: ` · ${valueLabel(language, String(values.aborted))}`,
+                        }
+                      : {}),
+                  }
+                : values,
+            )
+          : row.text}
+      </p>
+    );
+  }
+
+  if (row.kind === "image") {
+    return <ImagePreview image={row.image} language={language} />;
+  }
+  if (row.kind === "thinking") {
+    return (
+      <details className="thinking-row">
+        <summary>
+          <Sparkles size={13} /> {t("thinking")}
+        </summary>
+        <MarkdownBody text={row.text} language={language} />
+      </details>
+    );
+  }
+
+  if (row.kind === "tool")
+    return (
+      <ToolRowView row={row} language={language} todoHistory={todoHistory} />
+    );
+
+  return (
+    <MessageRow
+      row={row}
+      language={language}
+      onSpeak={onSpeak}
+      reading={readingRowId === row.id}
+      onFork={onFork}
+      forkPending={forkPending}
+    />
+  );
+});
+
+function ToolRowView({
+  row,
+  language,
+  todoHistory,
+}: {
+  row: ToolRow;
+  language: Language;
+  todoHistory?: ToolRow[];
+}) {
+  const expansion = useToolExpansion(row.status);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const t = (key: MessageKey) => translate(language, key);
+  const history = todoHistory?.length ? (
+    <details
+      className="todo-history"
+      open={historyOpen}
+      onToggle={(event) => setHistoryOpen(event.currentTarget.open)}
+    >
+      <summary>
+        {translate(language, "todoEarlierUpdates", { count: todoHistory.length })}
+      </summary>
+      {todoHistory.map((previous) => (
+        <ToolRowView key={previous.id} row={previous} language={language} />
+      ))}
+    </details>
+  ) : null;
+  const delegation =
+    isDelegationTool(row.name) && !row.images?.length
+      ? delegationInfo(row.args, row.result)
+      : null;
+  if (delegation)
+    return (
+      <DelegationCard
+        expansion={expansion}
+        row={row}
+        info={delegation}
+        language={language}
+        timing={
+          row.timing && <ToolElapsed timing={row.timing} language={language} />
+        }
+      />
+    );
+  const ask = isAskTool(row.name) ? askInfo(row.args, row.result) : null;
+  if (ask)
+    return (
+      <AskCard
+        expansion={expansion}
+        row={row}
+        info={ask}
+        language={language}
+        timing={
+          row.timing && <ToolElapsed timing={row.timing} language={language} />
+        }
+      />
+    );
+  const plan = row.name === "plan" ? planInfo(row.args, row.result) : null;
+  if (plan)
+    return (
+      <PlanCard
+        expansion={expansion}
+        row={row}
+        plan={plan}
+        language={language}
+      />
+    );
+  const todos = isTodoTool(row.name) ? todoInfo(row.result) : null;
+  if (todos)
+    return (
+      <TodoCard
+        expansion={expansion}
+        row={row}
+        todo={todos}
+        language={language}
+        history={history}
+      />
+    );
+  if (isShellTool(row.name))
+    return <ShellCard expansion={expansion} row={row} language={language} />;
+  const edits = editInfo(row.name, row.args);
+  if (edits)
+    return (
+      <EditCard
+        expansion={expansion}
+        row={row}
+        edits={edits}
+        language={language}
+      />
+    );
+  const resultText = typeof row.result === "string" ? row.result : null;
+  const isRead = ["read", "read_file", "readfile", "cat"].includes(
+    row.name
+      .trim()
+      .toLowerCase()
+      .replace(/^functions\./, ""),
+  );
+  const readResultText =
+    isRead && row.status !== "error" ? readOutput(row.result) : null;
+  const readResult = readResultText !== null;
+  const readPath = isRead ? pathOfArgs(row.args) : "";
+  const summary = toolSummary(row.name, row.args, row.status, language);
+  return (
+    <ToolDisclosure
+      expansion={expansion}
+      toolName={row.name}
+      {...summary}
+      status={row.status}
+      language={language}
+      timing={
+        row.timing && <ToolElapsed timing={row.timing} language={language} />
+      }
+    >
+      <div className="tool-detail">
+        {row.images?.map((image, index) => (
+          <ImagePreview
+            key={`${row.id}-image-${index}`}
+            image={image}
+            language={language}
+          />
+        ))}
+        {row.args !== undefined && (
+          <>
+            <h4>{t("input")}</h4>
+            <pre className="tool-arguments">{safeJson(row.args)}</pre>
+          </>
+        )}
+        <h4>{t("output")}</h4>
+        {readResult ? (
+          <ReadCode
+            path={readPath}
+            text={readResultText ?? ""}
+            language={language}
+          />
+        ) : resultText !== null ? (
+          isMarkdownText(resultText) ? (
+            <MarkdownBody text={resultText} language={language} />
+          ) : (
+            <pre className="tool-result-pre">{resultText}</pre>
+          )
+        ) : row.result !== undefined ? (
+          <pre>{safeJson(row.result)}</pre>
+        ) : (
+          <pre className="muted">{t("noOutput")}</pre>
+        )}
+        {history}
+      </div>
+    </ToolDisclosure>
+  );
+}
+
+function MessageRow({
+  row,
+  language,
+  onSpeak,
+  reading,
+  onFork,
+  forkPending,
+}: {
+  row: Extract<Row, { kind: "text" }>;
+  language: Language;
+  onSpeak?: (rowId: string, text: string) => void;
+  reading?: boolean;
+  onFork?: (entryId: string) => void;
+  forkPending?: boolean;
+}) {
+  const t = (key: MessageKey) => translate(language, key);
+  const [copiedMarkdown, setCopiedMarkdown] = useState(false);
+
+  async function copyMarkdown() {
+    try {
+      await navigator.clipboard.writeText(row.text);
+      setCopiedMarkdown(true);
+      window.setTimeout(() => setCopiedMarkdown(false), 1600);
+    } catch {
+      // Clipboard access can be denied; the message remains selectable.
+    }
+  }
+
+  return (
+    <article className={`message ${row.role}`}>
+      <div className="message-heading">
+        {row.role === "assistant" && <Mark />}
+        <strong>{row.role === "assistant" ? "rpi" : t("you")}</strong>
+      </div>
+      <div className="message-body">
+        {row.role === "assistant" ? (
+          <MarkdownBody text={row.text} language={language} />
+        ) : (
+          <UserMessageBody text={row.text} language={language} />
+        )}
+      </div>
+      {row.role === "assistant" && (
+        <div className="message-actions">
+          <button
+            type="button"
+            className="message-copy message-copy-markdown message-action-icon"
+            onClick={() => void copyMarkdown()}
+            aria-label={copiedMarkdown ? t("copied") : t("copyMarkdown")}
+            title={copiedMarkdown ? t("copied") : t("copyMarkdown")}
+          >
+            {copiedMarkdown ? <Check size={14} /> : <Copy size={14} />}
+          </button>
+          <button
+            type="button"
+            className="message-copy message-copy-markdown message-action-icon"
+            disabled={!row.entryId || forkPending}
+            onClick={() => row.entryId && onFork?.(row.entryId)}
+            aria-label={t("forkHere")}
+            title={t("forkHere")}
+          >
+            <GitBranch size={14} />
+          </button>
+          <button
+            type="button"
+            className="message-copy message-copy-markdown message-action-icon"
+            onClick={() => onSpeak?.(row.id, row.text)}
+            aria-label={reading ? t("stopReading") : t("readAloud")}
+            title={reading ? t("stopReading") : t("readAloud")}
+          >
+            {reading ? <VolumeX size={14} /> : <Volume2 size={14} />}
+          </button>
+        </div>
+      )}
+    </article>
+  );
+}
+
+function PlanCard({
+  expansion,
+  row,
+  plan,
+  language,
+}: {
+  expansion: ToolExpansion;
+  row: ToolRow;
+  plan: PlanInfo;
+  language: Language;
+}) {
+  const t = (key: MessageKey) => translate(language, key);
+  return (
+    <ToolDisclosure
+      expansion={expansion}
+      toolName={row.name}
+      className="plan-card"
+      action={t("plan")}
+      status={row.status}
+      language={language}
+      meta={plan.active ? t("planActive") : t("planDone")}
+      timing={
+        row.timing && <ToolElapsed timing={row.timing} language={language} />
+      }
+    >
+      <div className="tool-detail plan-detail">
+        {plan.outline.length > 0 && (
+          <ol className="plan-outline">
+            {plan.outline.map((step, index) => (
+              <li key={`${index}-${step.slice(0, 16)}`}>
+                <span className="plan-outline-index">{index + 1}</span>
+                <span>{step}</span>
+              </li>
+            ))}
+          </ol>
+        )}
+        <MarkdownBody text={plan.plan} language={language} />
+      </div>
+    </ToolDisclosure>
+  );
+}
+
+function TodoCard({
+  expansion,
+  row,
+  todo,
+  language,
+  history,
+}: {
+  expansion: ToolExpansion;
+  row: ToolRow;
+  todo: TodoInfo;
+  language: Language;
+  history?: ReactNode;
+}) {
+  const t = (key: MessageKey, values?: Record<string, string | number>) =>
+    translate(language, key, values);
+  const { items, done, total } = todo;
+  return (
+    <ToolDisclosure
+      expansion={expansion}
+      toolName={row.name}
+      className="todo-card"
+      action={t("todos")}
+      status={row.status}
+      doneLabel={t("todoCallDone")}
+      language={language}
+      meta={t("todoDone", { done, total })}
+      timing={
+        row.timing && <ToolElapsed timing={row.timing} language={language} />
+      }
+    >
+      <div className="tool-detail todo-detail">
+        {items.length > 0 && items.length < total && (
+          <p className="muted todo-scope">
+            {t("todoListed", { shown: items.length, total })}
+          </p>
+        )}
+        {items.length === 0 && (
+          <p className={`muted ${total > 0 ? "todo-summary-only" : "todo-empty"}`}>
+            {t(total > 0 ? "todoSummaryOnly" : "todoEmpty")}
+          </p>
+        )}
+        {items.length > 0 && (
+          <ul className="todo-list">
+            {items.map((item, index) => (
+              <li
+                key={`${index}-${item.text.slice(0, 16)}`}
+                className={
+                  item.done ? "done" : item.inProgress ? "in-progress" : ""
+                }
+              >
+                <span className="todo-check" aria-hidden="true">
+                  {item.done ? (
+                    <Check size={12} />
+                  ) : item.inProgress ? (
+                    <Loader2 size={12} className="spin" />
+                  ) : null}
+                </span>
+                <span>
+                  <span className="sr-only">
+                    {t(
+                      item.done
+                        ? "todoCompleted"
+                        : item.inProgress
+                          ? "todoInProgress"
+                          : "todoPending",
+                    )}
+                    {": "}
+                  </span>
+                  {item.text}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+        {history}
+      </div>
+    </ToolDisclosure>
+  );
+}
+
+function editLines(text: string): string[] {
+  return text ? text.replace(/\r\n/g, "\n").replace(/\n$/, "").split("\n") : [];
+}
+
+function EditCard({
+  expansion,
+  row,
+  edits,
+  language,
+}: {
+  expansion: ToolExpansion;
+  row: ToolRow;
+  edits: EditInfo;
+  language: Language;
+}) {
+  const t = (key: MessageKey, values?: Record<string, string | number>) =>
+    translate(language, key, values);
+  const added = edits.edits.reduce(
+    (n, edit) => n + editLines(edit.newText).length,
+    0,
+  );
+  const removed = edits.edits.reduce(
+    (n, edit) => n + editLines(edit.oldText).length,
+    0,
+  );
+  const summary = toolSummary(row.name, row.args, row.status, language);
+  return (
+    <ToolDisclosure
+      expansion={expansion}
+      toolName={row.name}
+      {...summary}
+      status={row.status}
+      language={language}
+      className="edit-card"
+      targetClassName="edit-summary-path"
+      meta={
+        <span className="edit-count">
+          <span className="add">+{added}</span>
+          <span className="remove">−{removed}</span>
+        </span>
+      }
+      timing={
+        row.timing && <ToolElapsed timing={row.timing} language={language} />
+      }
+    >
+      <div className="tool-detail edit-detail">
+        {edits.path && <div className="edit-path">{edits.path}</div>}
+        <div className="edit-content">
+          <div className="edit-content-heading">
+            <span className="edit-content-label">{t("editDiff")}</span>
+            <span className="edit-content-count">
+              {t(edits.edits.length === 1 ? "editChange" : "editChanges", {
+                count: edits.edits.length,
+              })}
+            </span>
+          </div>
+          <div className="edit-content-body">
+            {edits.edits.map((edit, index) => {
+              const oldLines = editLines(edit.oldText);
+              const newLines = editLines(edit.newText);
+              return (
+                <div
+                  className="edit-hunk"
+                  key={`${index}-${edit.oldText.slice(0, 12)}-${edit.newText.slice(0, 12)}`}
+                >
+                  {oldLines.map((line, lineIndex) => (
+                    <div className="edit-line remove" key={`o-${lineIndex}`}>
+                      <span className="edit-marker" aria-hidden="true">
+                        -
+                      </span>
+                      <code>{line || " "}</code>
+                    </div>
+                  ))}
+                  {newLines.map((line, lineIndex) => (
+                    <div className="edit-line add" key={`n-${lineIndex}`}>
+                      <span className="edit-marker" aria-hidden="true">
+                        +
+                      </span>
+                      <code>{line || " "}</code>
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
+            {row.result !== undefined && (
+              <pre className="edit-result">
+                {typeof row.result === "string"
+                  ? row.result
+                  : safeJson(row.result)}
+              </pre>
+            )}
+          </div>
+        </div>
+      </div>
+    </ToolDisclosure>
+  );
+}
+
+function ShellCard({
+  expansion,
+  row,
+  language,
+}: {
+  expansion: ToolExpansion;
+  row: ToolRow;
+  language: Language;
+}) {
+  const t = (key: MessageKey) => translate(language, key);
+  const { command, meta } = shellCommand(row.args);
+  const output = shellOutput(row.result);
+  const resultObj =
+    row.result && typeof row.result === "object" && !Array.isArray(row.result)
+      ? (row.result as Record<string, unknown>)
+      : null;
+  const exitCode =
+    resultObj && typeof resultObj.exitCode === "number"
+      ? String(resultObj.exitCode)
+      : resultObj && typeof resultObj.code === "number"
+        ? String(resultObj.code)
+        : "";
+  const hasStderr =
+    resultObj &&
+    typeof resultObj.stderr === "string" &&
+    !!resultObj.stderr.trim();
+  const metaParts = [
+    meta,
+    exitCode ? `exit ${exitCode}` : "",
+    hasStderr ? "stderr" : "",
+  ].filter(Boolean);
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(false), 1600);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+  async function copyCommand() {
+    if (!command) return;
+    try {
+      await navigator.clipboard.writeText(command);
+      setCopied(true);
+    } catch {
+      // Clipboard access can be denied; the command stays selectable.
+    }
+  }
+  return (
+    <ToolDisclosure
+      expansion={expansion}
+      toolName={row.name}
+      className="shell-card"
+      status={row.status}
+      language={language}
+      action={t(
+        row.status === "running" || row.status === "pending"
+          ? "toolRunningCommand"
+          : "toolRan",
+      )}
+      target={command || row.name}
+      targetClassName="shell-command"
+      timing={
+        row.timing && <ToolElapsed timing={row.timing} language={language} />
+      }
+    >
+      <div className="tool-detail shell-detail">
+        <div className="shell-window">
+          <div className="shell-command-heading">
+            <span className="shell-branch" aria-hidden="true">
+              └
+            </span>
+            <span className="shell-title">{row.name}</span>
+            {command && (
+              <button
+                type="button"
+                className="shell-copy"
+                onClick={() => void copyCommand()}
+              >
+                {copied ? <Check size={12} /> : <Copy size={12} />}
+                {copied ? t("copied") : t("copyCommand")}
+              </button>
+            )}
+          </div>
+          <div className="shell-body">
+            {command && <ShellCommand command={command} language={language} />}
+            {output ? (
+              <pre className="shell-output">{output}</pre>
+            ) : (
+              <pre className="shell-empty muted">{t("noOutput")}</pre>
+            )}
+          </div>
+        </div>
+        {metaParts.length > 0 && (
+          <p className="shell-meta">{metaParts.join(" · ")}</p>
+        )}
+      </div>
+    </ToolDisclosure>
+  );
+}
+
+function ToolElapsed({
+  timing,
+  language,
+}: {
+  timing: ToolTiming;
+  language: Language;
+}) {
+  const [, tick] = useState(0);
+  useEffect(() => {
+    if (!timing.running) return;
+    const interval = window.setInterval(() => tick((value) => value + 1), 100);
+    return () => window.clearInterval(interval);
+  }, [timing]);
+  const milliseconds = elapsedMs(timing);
+  const seconds = milliseconds / 1000;
+  const duration =
+    seconds < 60
+      ? `${seconds.toFixed(1)}s`
+      : seconds < 3600
+        ? `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`
+        : `${Math.floor(seconds / 3600)}h ${Math.floor(seconds / 60) % 60}m ${Math.floor(seconds % 60)}s`;
+  return (
+    <span
+      className="tool-elapsed"
+      aria-label={translate(language, "toolElapsed", { duration })}
+    >
+      {duration}
+    </span>
+  );
+}
+
+function RuntimePanel({
+  language,
+  sessionId,
+  supported,
+  canAuth,
+  runtime,
+  onChange,
+  onError,
+  autoRead,
+  onAutoRead,
+  onClose,
+}: {
+  language: Language;
+  sessionId: string;
+  supported: Set<string>;
+  canAuth: boolean;
+  runtime: RuntimeState | null;
+  onChange: (value: RuntimeState) => void;
+  onError: (message: string) => void;
+  autoRead: boolean;
+  onAutoRead: (value: boolean) => void;
+  onClose: () => void;
+}) {
+  const zh = language === "zh";
+  const t = (key: MessageKey, values?: Record<string, string | number>) =>
+    translate(language, key, values);
+  const [models, setModels] = useState<ModelDescriptor[]>([]);
+  const [levels, setLevels] = useState<string[]>([]);
+  const context = runtime?.context ?? null;
+  const [catalog, setCatalog] = useState<ToolCatalog | null>(null);
+  const [providersOpen, setProvidersOpen] = useState(false);
+  const [pending, setPending] = useState("");
+  const mounted = useRef(true);
+  const settingsRevision = useRef(0);
+  const settingsSession = useRef(sessionId);
+  settingsSession.current = sessionId;
+  useEffect(() => {
+    mounted.current = true;
+    settingsRevision.current++;
+    setPending("");
+    setModels([]);
+    setLevels([]);
+    setCatalog(null);
+    return () => {
+      mounted.current = false;
+      settingsRevision.current++;
+    };
+  }, [sessionId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLevels([]);
+    setCatalog(null);
+    void (async () => {
+      try {
+        const jobs: Promise<void>[] = [];
+        if (supported.has("get_available_models"))
+          jobs.push(
+            api.models(sessionId).then((data) => {
+              if (!cancelled) setModels(data.models ?? []);
+            }),
+          );
+        if (supported.has("get_available_thinking_levels"))
+          jobs.push(
+            api.thinkingLevels(sessionId).then((data) => {
+              if (!cancelled) setLevels(data.levels ?? []);
+            }),
+          );
+        if (supported.has("get_available_tools"))
+          jobs.push(
+            api.tools(sessionId).then((data) => {
+              if (!cancelled) setCatalog(data);
+            }),
+          );
+        await Promise.all(jobs);
+      } catch (cause) {
+        if (!cancelled) onError(errorText(cause));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [onError, sessionId, supported, runtime?.modelId, runtime?.provider]);
+
+  async function run(
+    label: string,
+    action: () => Promise<RuntimeState | void>,
+    applied?: (state: RuntimeState | void) => void,
+  ) {
+    setPending(label);
+    const revision = settingsRevision.current;
+    const current = () =>
+      mounted.current &&
+      settingsSession.current === sessionId &&
+      settingsRevision.current === revision;
+    try {
+      const next = await action();
+      if (current()) {
+        applied?.(next);
+        if (next) onChange(next);
+      }
+    } catch (cause) {
+      if (current()) onError(errorText(cause));
+    } finally {
+      if (current()) setPending("");
+    }
+  }
+
+  const model = models.find(
+    (entry) =>
+      entry.id === runtime?.modelId && entry.provider === runtime?.provider,
+  );
+  const level = normalizeLevel(runtime?.thinkingLevel);
+  const active = new Set(catalog?.activeTools ?? runtime?.activeTools ?? []);
+  const heading = (
+    <div className="panel-heading">
+      <h2>{zh ? "运行时设置" : "Runtime settings"}</h2>
+      <button
+        className="icon-button"
+        onClick={onClose}
+        aria-label={t("closePanel")}
+        title={t("closePanel")}
+      >
+        <X size={15} />
+      </button>
+    </div>
+  );
+
+  if (providersOpen) return (
+    <aside className="inspector">
+      {heading}
+      <ProviderManager
+        sessionId={sessionId}
+        language={language}
+        supported={supported}
+        canAuth={canAuth}
+        runtime={runtime}
+        onChange={onChange}
+        onBack={() => setProvidersOpen(false)}
+      />
+    </aside>
+  );
+
+  return (
+    <aside className="inspector">
+      {heading}
+      <label className="settings-toggle">
+        <input
+          type="checkbox"
+          checked={autoRead}
+          onChange={(event) => onAutoRead(event.target.checked)}
+        />
+        <span>{t("autoRead")}</span>
+      </label>
+      <button
+        type="button"
+        className="provider-manager-entry"
+        disabled={pending !== ""}
+        onClick={() => setProvidersOpen(true)}
+      >
+        <ShieldCheck size={14} aria-hidden="true" /> {zh ? "管理供应商" : "Manage providers"}
+      </button>
+      <label htmlFor="model">{zh ? "模型" : "Model"}</label>
+      <MenuSelect
+        label={zh ? "模型" : "Model"}
+        value={
+          runtime?.modelId
+            ? modelKey({ id: runtime.modelId, provider: runtime.provider })
+            : ""
+        }
+        disabled={
+          !supported.has("set_model") || pending !== "" || models.length === 0
+        }
+        onChange={(value) => {
+          const next = models.find((entry) => modelKey(entry) === value);
+          if (!next) return;
+          void run("model", async () => {
+            await commandData(sessionId, "set_model", {
+              modelId: next.id,
+              provider: next.provider,
+            });
+            return api.runtimeState(sessionId);
+          });
+        }}
+        options={[
+          { value: "", label: "—" },
+          ...models.map((entry) => ({
+            value: modelKey(entry),
+            label: `${entry.name} (${entry.provider})`,
+          })),
+        ]}
+      />
+      {model?.contextWindow ? (
+        <p className="muted">
+          {t("context")} {Math.round(model.contextWindow / 1000)}k
+        </p>
+      ) : null}
+
+      <label htmlFor="thinking">{zh ? "思考深度" : "Thinking level"}</label>
+      <MenuSelect
+        label={zh ? "思考深度" : "Thinking level"}
+        value={level}
+        disabled={
+          !supported.has("set_thinking_level") ||
+          pending !== "" ||
+          levels.length === 0
+        }
+        onChange={(next) =>
+          void run("thinking", async () => {
+            await commandData(sessionId, "set_thinking_level", { level: next });
+            return api.runtimeState(sessionId);
+          })
+        }
+        options={[
+          { value: "", label: "—" },
+          ...levels.map((entry) => ({
+            value: entry,
+            label: valueLabel(language, entry),
+          })),
+        ]}
+      />
+
+      <h3 className="panel-heading">{zh ? "上下文" : "Context"}</h3>
+      {context ? (
+        <>
+          <div
+            className="context-bar"
+            title={`${context.tokens} / ${context.window}`}
+          >
+            <span
+              className={
+                context.compactionEnabled && context.tokens > context.threshold
+                  ? "context-fill full"
+                  : "context-fill"
+              }
+              style={{
+                width: `${Math.min(100, Math.max(0, context.percent))}%`,
+              }}
+            />
+          </div>
+          <p className="muted">
+            {formatTokens(context.tokens)} / {formatTokens(context.window)} ·{" "}
+            {context.percent}%{context.estimated ? t("estimated") : ""}
+          </p>
+          <p className="muted">
+            {context.compactionEnabled
+              ? t("contextCompacts", {
+                  threshold: formatTokens(context.threshold),
+                  keep: formatTokens(context.keepRecentTokens),
+                })
+              : t("compactionDisabled")}
+          </p>
+        </>
+      ) : (
+        <p className="muted">
+          {zh ? "暂无用量数据" : "No usage reported yet."}
+        </p>
+      )}
+
+      <h3 className="panel-heading">{zh ? "启用的工具" : "Active tools"}</h3>
+      {catalog ? (
+        <div className="tool-stack">
+          {catalog.tools.map((tool) => (
+            <label key={tool} className="stat-row">
+              <span>{tool}</span>
+              <input
+                type="checkbox"
+                checked={active.has(tool)}
+                disabled={!supported.has("set_active_tools") || pending !== ""}
+                onChange={(event) => {
+                  const next = new Set(active);
+                  if (event.target.checked) next.add(tool);
+                  else next.delete(tool);
+                  const tools = [...next];
+                  void run(
+                    "tools",
+                    async () => {
+                      await commandData(sessionId, "set_active_tools", {
+                        tools,
+                      });
+                      return api.runtimeState(sessionId);
+                    },
+                    (state) =>
+                      setCatalog({
+                        tools: catalog.tools,
+                        activeTools: state?.activeTools ?? tools,
+                      }),
+                  );
+                }}
+              />
+            </label>
+          ))}
+        </div>
+      ) : (
+        <p className="muted">{t("noToolCatalog")}</p>
+      )}
+      {pending && (
+        <p className="muted">
+          <Loader2 size={12} className="spin" /> {t("applying")}
+        </p>
+      )}
+    </aside>
+  );
+}
